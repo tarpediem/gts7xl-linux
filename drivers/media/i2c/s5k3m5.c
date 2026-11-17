@@ -16,6 +16,7 @@
 
 #define S5K3M5_LINK_FREQ_602P5MHZ	(602500ULL * HZ_PER_KHZ)
 #define S5K3M5_MCLK_FREQ_24MHZ		(24 * HZ_PER_MHZ)
+#define S5K3M5_MCLK_FREQ_19P2MHZ	(19200 * HZ_PER_KHZ)
 #define S5K3M5_DATA_LANES		4
 
 /* Register map is similar to MIPI CCS compliant camera sensors */
@@ -869,6 +870,10 @@ static int s5k3m5_enable_streams(struct v4l2_subdev *sd,
 	const struct s5k3m5_reg_list *reg_list = &s5k3m5->mode->reg_list;
 	int ret;
 
+	/* The mode tables are for a 24 MHz MCLK only */
+	if (clk_get_rate(s5k3m5->mclk) != S5K3M5_MCLK_FREQ_24MHZ)
+		return -EOPNOTSUPP;
+
 	ret = pm_runtime_resume_and_get(s5k3m5->dev);
 	if (ret)
 		return ret;
@@ -1236,7 +1241,11 @@ static int s5k3m5_probe(struct i2c_client *client)
 				     "failed to get MCLK clock\n");
 
 	freq = clk_get_rate(s5k3m5->mclk);
-	if (freq != S5K3M5_MCLK_FREQ_24MHZ)
+	if (freq == S5K3M5_MCLK_FREQ_19P2MHZ)
+		/* Samsung boards (gts7xl): probe and identify only */
+		dev_warn(s5k3m5->dev,
+			 "MCLK 19.2 MHz: no register tables, streaming disabled\n");
+	else if (freq != S5K3M5_MCLK_FREQ_24MHZ)
 		return dev_err_probe(s5k3m5->dev, -EINVAL,
 				     "MCLK clock frequency %lu is not supported\n",
 				     freq);
