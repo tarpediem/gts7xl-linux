@@ -21,6 +21,7 @@
 #include <linux/power_supply.h>
 #include <linux/power/max17042_battery.h>
 #include <linux/of.h>
+#include <linux/property.h>
 #include <linux/regmap.h>
 
 /* Status register bits */
@@ -1570,6 +1571,12 @@ static int max17042_i2c_probe(struct i2c_client *client)
 
 	if (id) {
 		chip_type = id->driver_data;
+	} else if (is_of_node(dev_fwnode(dev)) && device_get_match_data(dev)) {
+		/*
+		 * Matched through of_match_table by a compatible that has no
+		 * i2c_device_id entry (maxim,max77705-battery).
+		 */
+		chip_type = (uintptr_t)device_get_match_data(dev);
 	} else {
 		acpi_id = acpi_match_device(dev->driver->acpi_match_table, dev);
 		if (!acpi_id)
