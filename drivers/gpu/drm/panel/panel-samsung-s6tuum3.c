@@ -14,7 +14,10 @@
  * Power sequence of the vendor kernel ("Anapass power sequence"):
  *   vddlcd on, 10 ms -> DSI lanes in LP-11 -> reset low 1 ms, high 1 ms ->
  *   200 ms, then wait up to 300 ms for TCON_RDY -> HS commands.
- * The reset and TCON wait are skipped when TCON_RDY is already high.
+ * The vendor kernel skips the reset and TCON wait when TCON_RDY is already
+ * high; here that shortcut is only taken after an enable() of our own that
+ * worked, never on the panel the bootloader left running (its DSI link dies
+ * when the MDSS is reset) nor after a failed enable().
  */
 
 #include <linux/backlight.h>
@@ -44,6 +47,7 @@ struct s6tuum3 {
 	struct gpio_desc *reset_gpio;
 	struct gpio_desc *tcon_rdy_gpio;
 	bool enabled;
+	bool initialised;	/* last enable() completed without error */
 	bool first_display_on_done;
 };
 
@@ -254,8 +258,11 @@ static void s6tuum3_tcon_prepare(struct s6tuum3 *ctx)
 	int i;
 
 	if (gpiod_get_value_cansleep(ctx->tcon_rdy_gpio)) {
-		dev_info(dev, "TCON ready, no reset\n");
-		return;
+		if (ctx->initialised) {
+			dev_info(dev, "TCON ready, no reset\n");
+			return;
+		}
+		dev_info(dev, "TCON ready but not initialised by us: reset\n");
 	}
 
 	/* qcom,mdss-dsi-reset-sequence = <0 1>, <1 1> (raw levels, ms) */
@@ -317,8 +324,19 @@ static int s6tuum3_enable(struct drm_panel *panel)
 			ctx->first_display_on_done = true;
 	}
 
-	if (dsi_ctx.accum_err)
-		return dsi_ctx.accum_err;
+	/*
+	 * Never fail: drm_panel_disable() is skipped after a failed enable(),
+	 * and the panel must still get display off before its power is cut
+	 * (the vendor kernel ignores TX errors and always runs the off path).
+	 * Force the reset path on the next enable() instead.
+	 */
+	if (dsi_ctx.accum_err) {
+		dev_err(&ctx->dsi->dev, "panel init failed: %d\n",
+			dsi_ctx.accum_err);
+		ctx->initialised = false;
+	} else {
+		ctx->initialised = true;
+	}
 
 	ctx->enabled = true;
 	return 0;
@@ -353,6 +371,7 @@ static int s6tuum3_unprepare(struct drm_panel *panel)
 	pinctrl_pm_select_sleep_state(dev);
 	msleep(10);	/* qcom,supply-pre-off-sleep */
 	regulator_disable(ctx->vddlcd);
+	ctx->initialised = false;
 
 	return 0;
 }
@@ -498,6 +517,7 @@ static struct mipi_dsi_driver s6tuum3_driver = {
 	.driver = {
 		.name = "panel-samsung-s6tuum3",
 		.of_match_table = s6tuum3_of_match,
+		.suppress_bind_attrs = true,
 	},
 };
 module_mipi_dsi_driver(s6tuum3_driver);
