@@ -490,6 +490,16 @@
  * the high-current path stays off.
  */
 /*
+ * Adreno 650. The zap shader is Samsung-signed: it comes from the stock
+ * NON-HLOS (modem) partition, image/a650_zap.{mdt,bNN}, joined into one
+ * file; it is not in linux-firmware. reserved gpu_mem above is the stock
+ * pil_gpu region.
+ */
+&gmu {
+	status = "okay";
+};
+
+/*
  * QUPv3_0 GPI, for i2c5. The stock tree uses an EE offset of 0x1000 here
  * (qcom,gpi-ee-offset in the live DT); with the sm8250 default of 0 every
  * GPI command times out on this board.
@@ -498,6 +508,14 @@
 	qcom,gpi-ee-offset = <0x1000>;
 
 	status = "okay";
+};
+
+&gpu {
+	status = "okay";
+};
+
+&gpu_zap_shader {
+	firmware-name = "qcom/sm8250/samsung/gts7xl/a650_zap.mbn";
 };
 
 &i2c0 {
