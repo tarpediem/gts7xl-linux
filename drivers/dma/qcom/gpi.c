@@ -2190,6 +2190,13 @@ static int gpi_probe(struct platform_device *pdev)
 	}
 
 	ee_offset = (uintptr_t)device_get_match_data(gpi_dev->dev);
+	/*
+	 * The EE offset depends on how the firmware partitions the GSI between
+	 * execution environments; some boards differ from the SoC default (and
+	 * from one QUP wrapper to the next). Let the DT override it.
+	 */
+	of_property_read_u32(gpi_dev->dev->of_node, "qcom,gpi-ee-offset",
+			     &ee_offset);
 	gpi_dev->ee_base = gpi_dev->ee_base - ee_offset;
 
 	gpi_dev->ev_factor = EV_FACTOR;
