@@ -50,7 +50,18 @@
 		#size-cells = <2>;
 		ranges;
 
-		/* Bootloader splash: 2800x1752 panel, left running by the ABL. */
+		/*
+		 * Bootloader splash: 2800x1752 command-mode panel, left running
+		 * by the ABL. There is no MDSS/DSI driver yet, so this node is
+		 * the only consumer of what the DSI host needs to stay alive:
+		 * the MDSS GDSC (else genpd sync_state collapses it once dispcc
+		 * has no consumer left to wait for), MMCX at the level of the
+		 * MDP clock the ABL left running (else rpmhpd sync_state drops
+		 * it to the camcc vote) and the DSI 0.88 V / 1.2 V rails (L9A is
+		 * shared with the UFS PHY, which switches it off on runtime
+		 * suspend). The panel keeps its own power (GPIO 135) and reset
+		 * (GPIO 82) as the ABL left them: nothing claims these pins.
+		 */
 		framebuffer: framebuffer@9c000000 {
 			compatible = "simple-framebuffer";
 			reg = <0x0 0x9c000000 0x0 0x2300000>;
@@ -58,6 +69,10 @@
 			height = <1752>;
 			stride = <(2800 * 4)>;
 			format = "a8r8g8b8";
+			power-domains = <&rpmhpd RPMHPD_MMCX>, <&dispcc MDSS_GDSC>;
+			required-opps = <&rpmhpd_opp_nom>;
+			vdda-0p9-supply = <&vreg_l5a_0p88>;
+			vdda-1p2-supply = <&vreg_l9a_1p2>;
 		};
 	};
 
