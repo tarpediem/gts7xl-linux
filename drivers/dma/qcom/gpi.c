@@ -1897,6 +1897,57 @@ static void gpi_issue_pending(struct dma_chan *chan)
 	read_unlock_irqrestore(&gpii->pm_lock, pm_lock_flags);
 }
 
+/*
+ * The channel and event ring contexts outlive the kernel that allocated them:
+ * a kernel started by kexec, or after any exit that did not tear the GPII
+ * down, finds them still allocated and EV ALLOCATE then never completes.
+ * Stop, reset and de-allocate whatever the hardware reports as allocated.
+ * Called with interrupts configured, before the event ring is allocated.
+ */
+static void gpi_reclaim_gpii(struct gpii *gpii)
+{
+	u32 ch_state[MAX_CHANNELS_PER_GPII];
+	bool stale;
+	u32 ev_state;
+	int i;
+
+	ev_state = FIELD_GET(GPII_n_EV_k_CNTXT_0_CHSTATE,
+			     gpi_read_reg(gpii, gpii->ev_cntxt_base_reg + CNTXT_0_CONFIG));
+	stale = ev_state != EV_STATE_NOT_ALLOCATED;
+	for (i = 0; i < MAX_CHANNELS_PER_GPII; i++) {
+		ch_state[i] = FIELD_GET(GPII_n_CH_k_CNTXT_0_CHSTATE,
+					gpi_read_reg(gpii, gpii->gchan[i].ch_cntxt_base_reg +
+						     CNTXT_0_CONFIG));
+		if (ch_state[i] != CH_STATE_NOT_ALLOCATED)
+			stale = true;
+	}
+
+	if (!stale)
+		return;
+
+	dev_dbg(gpii->gpi_dev->dev, "gpii%u left allocated (ev:%u ch:%u/%u), resetting it\n",
+		gpii->gpii_id, ev_state, ch_state[0], ch_state[1]);
+
+	for (i = 0; i < MAX_CHANNELS_PER_GPII; i++) {
+		struct gchan *gchan = &gpii->gchan[i];
+
+		switch (ch_state[i]) {
+		case CH_STATE_NOT_ALLOCATED:
+			continue;
+		case CH_STATE_STARTED:
+		case CH_STATE_STOP_IN_PROC:
+			gpi_send_cmd(gpii, gchan, GPI_CH_CMD_STOP);
+			fallthrough;
+		default:
+			gpi_send_cmd(gpii, gchan, GPI_CH_CMD_RESET);
+			gpi_send_cmd(gpii, gchan, GPI_CH_CMD_DE_ALLOC);
+		}
+	}
+
+	if (ev_state != EV_STATE_NOT_ALLOCATED)
+		gpi_send_cmd(gpii, NULL, GPI_EV_CMD_DEALLOC);
+}
+
 static int gpi_ch_init(struct gchan *gchan)
 {
 	struct gpii *gpii = gchan->gpii;
@@ -1935,6 +1986,8 @@ static int gpi_ch_init(struct gchan *gchan)
 		dev_err(gpii->gpi_dev->dev, "error config. interrupts, ret:%d\n", ret);
 		goto error_config_int;
 	}
+
+	gpi_reclaim_gpii(gpii);
 
 	/* allocate event rings */
 	ret = gpi_alloc_ev_chan(gpii);
@@ -2302,6 +2355,58 @@ static int gpi_probe(struct platform_device *pdev)
 	return ret;
 }
 
+/*
+ * Leave every active GPII de-allocated for whatever runs next, e.g. a kernel
+ * started by kexec (see gpi_reclaim_gpii()). Clients have shut down first.
+ */
+static void gpi_shutdown(struct platform_device *pdev)
+{
+	struct gpi_dev *gpi_dev = platform_get_drvdata(pdev);
+	unsigned int i;
+	int chid;
+
+	for (i = 0; i < gpi_dev->max_gpii; i++) {
+		struct gpii *gpii = &gpi_dev->gpiis[i];
+
+		if (!((1 << i) & gpi_dev->gpii_mask))
+			continue;
+
+		mutex_lock(&gpii->ctrl_lock);
+		if (gpii->pm_state != ACTIVE_STATE) {
+			mutex_unlock(&gpii->ctrl_lock);
+			continue;
+		}
+
+		for (chid = 0; chid < MAX_CHANNELS_PER_GPII; chid++) {
+			struct gchan *gchan = &gpii->gchan[chid];
+
+			if (gchan->pm_state != ACTIVE_STATE)
+				continue;
+
+			write_lock_irq(&gpii->pm_lock);
+			gchan->pm_state = PREPARE_TERMINATE;
+			write_unlock_irq(&gpii->pm_lock);
+
+			gpi_stop_chan(gchan);
+			gpi_send_cmd(gpii, gchan, GPI_CH_CMD_RESET);
+			gpi_send_cmd(gpii, gchan, GPI_CH_CMD_DE_ALLOC);
+		}
+
+		write_lock_irq(&gpii->pm_lock);
+		gpii->pm_state = PREPARE_TERMINATE;
+		write_unlock_irq(&gpii->pm_lock);
+
+		tasklet_kill(&gpii->ev_task);
+		gpi_send_cmd(gpii, NULL, GPI_EV_CMD_DEALLOC);
+		gpi_disable_interrupts(gpii);
+
+		write_lock_irq(&gpii->pm_lock);
+		gpii->pm_state = DISABLE_STATE;
+		write_unlock_irq(&gpii->pm_lock);
+		mutex_unlock(&gpii->ctrl_lock);
+	}
+}
+
 static const struct of_device_id gpi_of_match[] = {
 	{ .compatible = "qcom,sdm845-gpi-dma", .data = (void *)0x0 },
 	{ .compatible = "qcom,sm6350-gpi-dma", .data = (void *)0x10000 },
@@ -2321,6 +2426,7 @@ MODULE_DEVICE_TABLE(of, gpi_of_match);
 
 static struct platform_driver gpi_driver = {
 	.probe = gpi_probe,
+	.shutdown = gpi_shutdown,
 	.driver = {
 		.name = KBUILD_MODNAME,
 		.of_match_table = gpi_of_match,
