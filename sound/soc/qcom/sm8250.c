@@ -18,6 +18,16 @@
 
 #define MI2S_BCLK_RATE		1536000
 
+/*
+ * Primary TDM: one frame of 4 slots of 16 bits at 48 kHz (bit clock 3.072 MHz),
+ * the SoC provides both clocks. Each codec on the link plays one channel: codec n
+ * of the dai-link takes slot (n % channels), so with 4 speaker amplifiers listed
+ * as left, right, left, right, the two front-end channels reach both sides.
+ */
+#define PRI_TDM_SLOTS		4
+#define PRI_TDM_SLOT_WIDTH	16
+#define PRI_TDM_BCLK_RATE	(48000 * PRI_TDM_SLOTS * PRI_TDM_SLOT_WIDTH)
+
 struct sm8250_snd_data {
 	bool stream_prepared[AFE_PORT_MAX];
 	struct snd_soc_card *card;
@@ -55,6 +65,79 @@ static void sm8250_snd_exit(struct snd_soc_pcm_runtime *rtd)
 
 }
 
+static int sm8250_pri_tdm_hw_params(struct snd_pcm_substream *substream,
+				    struct snd_pcm_hw_params *params)
+{
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
+	struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
+	unsigned int channels = params_channels(params);
+	unsigned int offsets[PRI_TDM_SLOTS];
+	unsigned int mask = (1U << channels) - 1;
+	struct snd_soc_dai *codec_dai;
+	unsigned int slot;
+	int ret, i;
+
+	if (channels > PRI_TDM_SLOTS)
+		return -EINVAL;
+
+	/* AFE channel map: byte offset of each channel in the frame */
+	for (i = 0; i < channels; i++)
+		offsets[i] = i * PRI_TDM_SLOT_WIDTH / 8;
+
+	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
+		ret = snd_soc_dai_set_tdm_slot(cpu_dai, 0, mask, PRI_TDM_SLOTS,
+					       PRI_TDM_SLOT_WIDTH);
+		if (ret < 0)
+			return ret;
+		ret = snd_soc_dai_set_channel_map(cpu_dai, 0, NULL, channels, offsets);
+	} else {
+		ret = snd_soc_dai_set_tdm_slot(cpu_dai, mask, 0, PRI_TDM_SLOTS,
+					       PRI_TDM_SLOT_WIDTH);
+		if (ret < 0)
+			return ret;
+		ret = snd_soc_dai_set_channel_map(cpu_dai, channels, offsets, 0, NULL);
+	}
+	if (ret < 0)
+		return ret;
+
+	for_each_rtd_codec_dais(rtd, i, codec_dai) {
+		slot = i % channels;
+		if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
+			ret = snd_soc_dai_set_channel_map(codec_dai, 0, NULL, 1, &slot);
+		else
+			ret = 0;
+		if (ret < 0 && ret != -ENOTSUPP)
+			return ret;
+
+		/* The bit clock is the codec's only clock (clock id 0: SCLK) */
+		ret = snd_soc_component_set_sysclk(codec_dai->component, 0, 0,
+						   PRI_TDM_BCLK_RATE, SND_SOC_CLOCK_IN);
+		if (ret < 0 && ret != -ENOTSUPP)
+			return ret;
+		ret = snd_soc_dai_set_sysclk(codec_dai, 0, PRI_TDM_BCLK_RATE,
+					     SND_SOC_CLOCK_IN);
+		if (ret < 0 && ret != -ENOTSUPP)
+			return ret;
+	}
+
+	return 0;
+}
+
+static int sm8250_snd_hw_params(struct snd_pcm_substream *substream,
+				struct snd_pcm_hw_params *params)
+{
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
+	struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
+
+	switch (cpu_dai->id) {
+	case PRIMARY_TDM_RX_0:
+	case PRIMARY_TDM_TX_0:
+		return sm8250_pri_tdm_hw_params(substream, params);
+	default:
+		return 0;
+	}
+}
+
 static int sm8250_be_hw_params_fixup(struct snd_soc_pcm_runtime *rtd,
 				     struct snd_pcm_hw_params *params)
 {
@@ -78,8 +161,30 @@ static int sm8250_snd_startup(struct snd_pcm_substream *substream)
 	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
 	struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
 	struct snd_soc_dai *codec_dai = snd_soc_rtd_to_codec(rtd, 0);
+	int i, ret;
 
 	switch (cpu_dai->id) {
+	case PRIMARY_TDM_RX_0:
+	case PRIMARY_TDM_TX_0:
+		/*
+		 * q6afe drives the TDM bit clock with its "invert" attribute, so
+		 * the codec samples on the normal edge (stock pairs a normal SoC
+		 * clock with an inverted codec clock). Like the MI2S ports above,
+		 * the bit clock stays on once started: the codecs run their PLL
+		 * from it and power down after the stream has stopped.
+		 */
+		codec_dai_fmt |= SND_SOC_DAIFMT_NB_NF | SND_SOC_DAIFMT_DSP_A;
+		ret = snd_soc_dai_set_sysclk(cpu_dai, Q6AFE_LPASS_CLK_ID_PRI_TDM_IBIT,
+					     PRI_TDM_BCLK_RATE,
+					     SNDRV_PCM_STREAM_PLAYBACK);
+		if (ret < 0)
+			return ret;
+		for_each_rtd_codec_dais(rtd, i, codec_dai) {
+			ret = snd_soc_dai_set_fmt(codec_dai, codec_dai_fmt);
+			if (ret < 0)
+				return ret;
+		}
+		break;
 	case PRIMARY_MI2S_RX:
 		codec_dai_fmt |= SND_SOC_DAIFMT_NB_NF | SND_SOC_DAIFMT_I2S;
 		snd_soc_dai_set_sysclk(cpu_dai,
@@ -156,6 +261,7 @@ static int sm8250_snd_hw_free(struct snd_pcm_substream *substream)
 static const struct snd_soc_ops sm8250_be_ops = {
 	.startup = sm8250_snd_startup,
 	.shutdown = qcom_snd_sdw_shutdown,
+	.hw_params = sm8250_snd_hw_params,
 	.hw_free = sm8250_snd_hw_free,
 	.prepare = sm8250_snd_prepare,
 };
