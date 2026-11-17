@@ -30,6 +30,14 @@ static const char *max77705_charger_manufacturer	= "Maxim Integrated";
 #define MAX77705_TEMP_FAULT_LOW_MC	(-35000) /* open or shorted thermistor */
 #define MAX77705_TEMP_FAULT_HIGH_MC	95000
 #define MAX77705_CHG_DTLS_WDT_EXPIRED	0x0b
+/* USB-C block (0x25): BC_STATUS, as the vendor MUIC driver reads it */
+#define MAX77705_USBC_ADDR		0x25
+#define MAX77705_USBC_REG_BC_STATUS	0x08
+#define MAX77705_BC_CHGTYP_MASK		GENMASK(1, 0)
+#define MAX77705_BC_CHGTYP_SDP		1
+#define MAX77705_BC_CHGTYP_CDP		2
+#define MAX77705_BC_CHGTYP_DCP		3
+#define MAX77705_BC_VBUSDET		BIT(7)
 #define MAX77705_SOC_END_DEFAULT	80	/* % of capacity, battery longevity */
 #define MAX77705_SOC_START_DEFAULT	75
 
@@ -54,6 +62,7 @@ static enum power_supply_property max77705_charger_props[] = {
 	POWER_SUPPLY_PROP_CHARGE_BEHAVIOUR,
 	POWER_SUPPLY_PROP_CHARGE_CONTROL_START_THRESHOLD,
 	POWER_SUPPLY_PROP_CHARGE_CONTROL_END_THRESHOLD,
+	POWER_SUPPLY_PROP_USB_TYPE,
 };
 
 #define MAX77705_CHGIN_LIM_REG_MIN	3	/* 100 mA, the lowest input limit */
@@ -518,6 +527,9 @@ static int max77705_chg_get_property(struct power_supply *psy,
 			return -ENODATA;
 		val->intval = READ_ONCE(chg->soc_end);
 		break;
+	case POWER_SUPPLY_PROP_USB_TYPE:
+		val->intval = READ_ONCE(chg->usb_type);
+		break;
 	case POWER_SUPPLY_PROP_MODEL_NAME:
 		val->strval = max77705_charger_model;
 		break;
@@ -629,6 +641,10 @@ static const struct power_supply_desc max77705_charger_psy_desc = {
 	.set_property = max77705_set_property,
 	.charge_behaviours = BIT(POWER_SUPPLY_CHARGE_BEHAVIOUR_AUTO) |
 			     BIT(POWER_SUPPLY_CHARGE_BEHAVIOUR_INHIBIT_CHARGE),
+	.usb_types = BIT(POWER_SUPPLY_USB_TYPE_UNKNOWN) |
+		     BIT(POWER_SUPPLY_USB_TYPE_SDP) |
+		     BIT(POWER_SUPPLY_USB_TYPE_CDP) |
+		     BIT(POWER_SUPPLY_USB_TYPE_DCP),
 };
 
 static void max77705_chgin_isr_work(struct work_struct *work)
@@ -761,6 +777,7 @@ static int max77705_charger_initialize(struct max77705_charger_data *chg)
 					    max77705_chgin_ua_to_reg(chg->chgin_max_ua));
 		if (err)
 			goto err;
+		chg->chgin_sdp_ua = chg->chgin_max_ua;
 	}
 
 	err = regmap_field_write(chg->rfield[MAX77705_VCHGIN], MAX77705_VCHGIN_4_5);
@@ -809,6 +826,41 @@ static int max77705_charger_initialize(struct max77705_charger_data *chg)
 err:
 	return dev_err_probe(chg->dev, err, "error while configuring");
 
+}
+
+/*
+ * BC1.2 result of the USB-C block's firmware (BC_STATUS, read only, the
+ * address is not claimed so the initramfs MUIC hook keeps using it).
+ * Returns the input limit for this cable: the DCP value only when a DCP is
+ * positively detected with VBUS present, the SDP value otherwise, read
+ * errors included.
+ */
+static unsigned int max77705_cable_input_limit(struct max77705_charger_data *chg)
+{
+	union i2c_smbus_data data;
+	int type = POWER_SUPPLY_USB_TYPE_UNKNOWN;
+	unsigned int ua = chg->chgin_sdp_ua;
+
+	if (chg->usbc_adap &&
+	    !i2c_smbus_xfer(chg->usbc_adap, MAX77705_USBC_ADDR, 0, I2C_SMBUS_READ,
+			    MAX77705_USBC_REG_BC_STATUS, I2C_SMBUS_BYTE_DATA, &data) &&
+	    (data.byte & MAX77705_BC_VBUSDET)) {
+		switch (data.byte & MAX77705_BC_CHGTYP_MASK) {
+		case MAX77705_BC_CHGTYP_SDP:
+			type = POWER_SUPPLY_USB_TYPE_SDP;
+			break;
+		case MAX77705_BC_CHGTYP_CDP:
+			type = POWER_SUPPLY_USB_TYPE_CDP;
+			break;
+		case MAX77705_BC_CHGTYP_DCP:
+			type = POWER_SUPPLY_USB_TYPE_DCP;
+			if (chg->chgin_dcp_ua)
+				ua = chg->chgin_dcp_ua;
+			break;
+		}
+	}
+	WRITE_ONCE(chg->usb_type, type);
+	return ua;
 }
 
 /*
@@ -977,6 +1029,26 @@ static void max77705_safety_check(struct max77705_charger_data *chg)
 		regmap_update_bits(chg->regmap, MAX77705_CHG_REG_CNFG_00,
 				   MAX77705_WDTEN_MASK, MAX77705_WDTEN_MASK);
 
+	/*
+	 * 2d. input limit for the attached cable. On a change (plug, unplug,
+	 * other cable) the register is set to the new reference; otherwise only
+	 * the "not above" check below applies, so a lower AICL value stays.
+	 */
+	if (chg->chgin_sdp_ua) {
+		unsigned int ref = online ? max77705_cable_input_limit(chg) : chg->chgin_sdp_ua;
+
+		if (!online)
+			WRITE_ONCE(chg->usb_type, POWER_SUPPLY_USB_TYPE_UNKNOWN);
+		if (ref != chg->chgin_max_ua) {
+			dev_info(chg->dev, "input limit %u uA (USB type %d)\n", ref,
+				 READ_ONCE(chg->usb_type));
+			chg->chgin_max_ua = ref;
+			if (regmap_field_write(chg->rfield[MAX77705_CHG_CHGIN_LIM],
+					       max77705_chgin_ua_to_reg(ref)))
+				block |= BIT(MAX77705_BLOCK_IO);
+		}
+	}
+
 	/* 3. limits */
 	lim = max77705_safety_limits_ok(chg);
 	if (lim == 0) {
@@ -1116,6 +1188,11 @@ static int max77705_charger_probe(struct i2c_client *i2c)
 	}
 	if (chg->temp_chan)
 		device_property_read_u32(dev, "maxim,safety-timer-sec", &chg->safety_timer_s);
+	if (chg->temp_chan &&
+	    !device_property_read_u32(dev, "maxim,dcp-input-current-limit-microamp",
+				      &chg->chgin_dcp_ua))
+		chg->usbc_adap = i2c->adapter;
+	chg->usb_type = POWER_SUPPLY_USB_TYPE_UNKNOWN;
 	chg->soc_end = MAX77705_SOC_END_DEFAULT;
 	chg->soc_start = MAX77705_SOC_START_DEFAULT;
 	chg->soc = -1;
@@ -1184,8 +1261,8 @@ static int max77705_charger_probe(struct i2c_client *i2c)
 	/* first check now: enables charging if everything is in range */
 	mod_delayed_work(system_wq, &chg->safety_work, 0);
 
-	dev_info(dev, "safety monitor: CC %u uA, CHGIN %u uA, CV reg 0x%x, battery %d..%d C, timer %u s, capacity %d..%d %%\n",
-		 chg->cc_max_ua, chg->chgin_max_ua, chg->cv_reg,
+	dev_info(dev, "safety monitor: CC %u uA, CHGIN %u uA (DCP %u uA), CV reg 0x%x, battery %d..%d C, timer %u s, capacity %d..%d %%\n",
+		 chg->cc_max_ua, chg->chgin_sdp_ua, chg->chgin_dcp_ua, chg->cv_reg,
 		 chg->bat_info->temp_alert_min, chg->bat_info->temp_alert_max,
 		 chg->safety_timer_s, chg->soc_start, chg->soc_end);
 

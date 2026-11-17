@@ -222,7 +222,11 @@ struct max77705_charger_data {
 	int			soc;
 	unsigned long		block;
 	unsigned int		cc_max_ua;
-	unsigned int		chgin_max_ua;
+	unsigned int		chgin_max_ua;	/* reference input limit now (per cable) */
+	unsigned int		chgin_sdp_ua;	/* default: USB SDP, CDP, unknown */
+	unsigned int		chgin_dcp_ua;	/* BC1.2 DCP detected; 0 = not used */
+	struct i2c_adapter	*usbc_adap;	/* USB-C block, read only, not claimed */
+	int			usb_type;
 	unsigned int		cv_reg;		/* encoded target, from DT */
 	unsigned long		limit_rewrites;
 	unsigned int		safety_timer_s;

@@ -39,6 +39,13 @@ properties:
   input-current-limit-microamp:
     description: Upper limit of the CHGIN input current.
 
+  maxim,dcp-input-current-limit-microamp:
+    description:
+      With the battery thermistor, input limit used only while the USB-C
+      block's BC1.2 detection reports a dedicated charging port (DCP);
+      every other cable, or an unreadable status, gets
+      input-current-limit-microamp.
+
   maxim,safety-timer-sec:
     description:
       With the battery thermistor, stop charging after this much charging
@@ -47,6 +54,7 @@ properties:
 dependencies:
   io-channel-names: [ io-channels ]
   maxim,safety-timer-sec: [ io-channels ]
+  maxim,dcp-input-current-limit-microamp: [ io-channels, input-current-limit-microamp ]
 
 required:
   - compatible
