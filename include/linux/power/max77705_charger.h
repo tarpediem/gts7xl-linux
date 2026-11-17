@@ -191,6 +191,8 @@ enum max77705_block {
 	MAX77705_BLOCK_SENSOR,
 	MAX77705_BLOCK_TIMER,
 	MAX77705_BLOCK_LIMITS,
+	MAX77705_BLOCK_IO,	/* a register could not be read */
+	MAX77705_BLOCK_USER,	/* charge_behaviour = inhibit-charge */
 };
 
 struct max77705_charger_data {
@@ -212,10 +214,12 @@ struct max77705_charger_data {
 	struct delayed_work	safety_work;
 	struct mutex		lock;
 	bool			safety_ready;
+	bool			user_inhibit;
 	unsigned long		block;
 	unsigned int		cc_max_ua;
 	unsigned int		chgin_max_ua;
-	unsigned int		cv_reg;
+	unsigned int		cv_reg;		/* encoded target, from DT */
+	unsigned long		limit_rewrites;
 	unsigned int		safety_timer_s;
 	u64			charge_time_s;
 	u64			last_check_s;
