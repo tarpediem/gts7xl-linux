@@ -1,0 +1,74 @@
+# SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/display/panel/samsung,s6tuum3-amsa24vu01.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Samsung AMSA24VU01 OLED panel with S6TUUM3 DDIC
+
+maintainers:
+  - tarpediem <tarpediem@gmail.com>
+
+description:
+  2800x1752 OLED panel with a Samsung S6TUUM3 display driver IC and an
+  Anapass timing controller, driven over four DSI lanes in command mode
+  with Display Stream Compression. The module makes its own panel rails
+  from a single supply. Found in the Samsung Galaxy Tab S7+.
+
+allOf:
+  - $ref: panel-common.yaml#
+
+properties:
+  compatible:
+    const: samsung,s6tuum3-amsa24vu01
+
+  reg:
+    maxItems: 1
+
+  vddlcd-supply:
+    description: Power supply of the panel module
+
+  reset-gpios: true
+
+  tcon-rdy-gpios:
+    maxItems: 1
+    description: TCON ready output of the panel, high once the timing
+      controller has started after reset
+
+  port: true
+
+required:
+  - compatible
+  - reg
+  - vddlcd-supply
+  - reset-gpios
+  - tcon-rdy-gpios
+  - port
+
+unevaluatedProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/gpio/gpio.h>
+
+    dsi {
+        #address-cells = <1>;
+        #size-cells = <0>;
+
+        panel@0 {
+            compatible = "samsung,s6tuum3-amsa24vu01";
+            reg = <0>;
+
+            vddlcd-supply = <&vreg_panel>;
+            reset-gpios = <&tlmm 82 GPIO_ACTIVE_LOW>;
+            tcon-rdy-gpios = <&tlmm 26 GPIO_ACTIVE_HIGH>;
+
+            port {
+                endpoint {
+                    remote-endpoint = <&dsi0_out>;
+                };
+            };
+        };
+    };
+
+...

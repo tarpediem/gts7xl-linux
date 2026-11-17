@@ -1095,6 +1095,18 @@ config DRM_PANEL_SAMSUNG_S6E8FC0
 	    M1906F9 (M1906F9SH or M1906F9SI), 6.09 inch 720x1560, found
 	    in the Xiaomi Mi A3 smartphone (xiaomi-laurel).
 
+config DRM_PANEL_SAMSUNG_S6TUUM3
+	tristate "Samsung S6TUUM3 AMSA24VU01 DSI panel"
+	depends on GPIOLIB
+	depends on OF
+	depends on DRM_MIPI_DSI
+	depends on BACKLIGHT_CLASS_DEVICE
+	help
+	  Say Y or M here if you want to enable support for the Samsung
+	  AMSA24VU01 2800x1752 OLED panel with an S6TUUM3 DDIC and an
+	  Anapass TCON, driven in DSI command mode with DSC. It is found
+	  in the Samsung Galaxy Tab S7+ (gts7xl).
+
 config DRM_PANEL_SAMSUNG_SOFEF00
 	tristate "Samsung SOFEF00 DSI panel controller"
 	depends on GPIOLIB
