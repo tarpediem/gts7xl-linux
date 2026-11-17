@@ -72,6 +72,10 @@
 #define FTS1B_SCAN_OFF			0x00
 #define FTS1B_SCAN_MS_SS		0x01
 
+/* polls of the event FIFO, 20 ms apart: about 1 s for ready, 0.5 s for an echo */
+#define FTS1B_READY_POLLS		50
+#define FTS1B_ECHO_POLLS		25
+
 struct stmfts1b {
 	struct i2c_client *client;
 	struct input_dev *input;
@@ -126,7 +130,8 @@ static int stmfts1b_read_event(struct stmfts1b *ts, u8 *ev)
 
 /*
  * Poll the event FIFO for the "controller ready" status event after a reset.
- * Vendor fts_wait_for_ready(): 20 ms between reads, about 150 reads.
+ * Vendor fts_wait_for_ready() polls every 20 ms for up to ~3 s; bounded to
+ * ~1 s here. Any I2C error ends the wait at once.
  */
 static int stmfts1b_wait_ready(struct stmfts1b *ts)
 {
@@ -134,7 +139,7 @@ static int stmfts1b_wait_ready(struct stmfts1b *ts)
 	u8 ev[FTS1B_EVENT_SIZE];
 	int i, ret;
 
-	for (i = 0; i < 150; i++) {
+	for (i = 0; i < FTS1B_READY_POLLS; i++) {
 		ret = stmfts1b_read_event(ts, ev);
 		if (ret)
 			return ret;
@@ -168,7 +173,7 @@ static int stmfts1b_command_echo(struct stmfts1b *ts, const u8 *cmd, u16 len)
 	if (ret)
 		return ret;
 
-	for (i = 0; i < 100; i++) {
+	for (i = 0; i < FTS1B_ECHO_POLLS; i++) {
 		ret = stmfts1b_read_event(ts, ev);
 		if (ret)
 			return ret;
@@ -557,6 +562,7 @@ static struct i2c_driver stmfts1b_driver = {
 		.of_match_table = stmfts1b_of_match,
 		.pm = pm_sleep_ptr(&stmfts1b_pm_ops),
 		.suppress_bind_attrs = true,
+		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
 	},
 	.probe = stmfts1b_probe,
 	.id_table = stmfts1b_id,
