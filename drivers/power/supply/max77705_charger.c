@@ -9,6 +9,7 @@
 
 #include <linux/devm-helpers.h>
 #include <linux/i2c.h>
+#include <linux/iio/consumer.h>
 #include <linux/interrupt.h>
 #include <linux/mfd/max77693-common.h>
 #include <linux/mfd/max77705-private.h>
@@ -16,10 +17,19 @@
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/power_supply.h>
+#include <linux/property.h>
 #include <linux/regmap.h>
+#include <linux/timekeeping.h>
 
 static const char *max77705_charger_model		= "max77705";
 static const char *max77705_charger_manufacturer	= "Maxim Integrated";
+
+/* Safety monitor (see struct max77705_charger_data) */
+#define MAX77705_SAFETY_POLL_MS		10000	/* also kicks the charger watchdog */
+#define MAX77705_TEMP_HYST_MC		2000	/* recovery 2 C inside the alert window */
+#define MAX77705_TEMP_FAULT_LOW_MC	(-35000) /* open or shorted thermistor */
+#define MAX77705_TEMP_FAULT_HIGH_MC	95000
+#define MAX77705_CHG_DTLS_WDT_EXPIRED	0x0b
 
 static const struct regmap_config max77705_chg_regmap_config = {
 	.reg_base = MAX77705_CHG_REG_BASE,
@@ -38,6 +48,7 @@ static enum power_supply_property max77705_charger_props[] = {
 	POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE,
 	POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT,
 	POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT,
+	POWER_SUPPLY_PROP_TEMP,
 };
 
 static irqreturn_t max77705_aicl_irq(int irq, void *irq_drv_data)
@@ -137,15 +148,17 @@ static int max77705_get_online(struct regmap *regmap, int *val)
 	return 0;
 }
 
-static int max77705_set_integer(struct max77705_charger_data *chg, enum max77705_field_idx fidx,
-				unsigned int clamp_min, unsigned int clamp_max,
-				unsigned int div, int val)
+static unsigned int max77705_cc_ua_to_reg(unsigned int ua)
 {
-	unsigned int regval;
+	return clamp_val(ua, MAX77705_CURRENT_CHGIN_MIN, MAX77705_CURRENT_CHGIN_MAX) /
+		MAX77705_CURRENT_CHG_STEP;
+}
 
-	regval = clamp_val(val, clamp_min, clamp_max) / div;
-
-	return regmap_field_write(chg->rfield[fidx], regval);
+static unsigned int max77705_chgin_ua_to_reg(unsigned int ua)
+{
+	/* read back as (reg + 1) * 25 mA, as in max77705_get_input_current() */
+	return clamp_val(ua, MAX77705_CURRENT_CHGIN_MIN, MAX77705_CURRENT_CHGIN_MAX) /
+		MAX77705_CURRENT_CHGIN_STEP - 1;
 }
 
 static int max77705_check_battery(struct max77705_charger_data *chg, int *val)
@@ -202,10 +215,13 @@ static int max77705_get_status(struct max77705_charger_data *chg, int *val)
 {
 	struct regmap *regmap = chg->regmap;
 	unsigned int reg_data, chg_en;
+	int online = 0;
 
 	regmap_field_read(chg->rfield[MAX77705_CHG_EN], &chg_en);
 	if (!chg_en) {
-		*val = POWER_SUPPLY_CHARGE_TYPE_NONE;
+		max77705_get_online(regmap, &online);
+		*val = online ? POWER_SUPPLY_STATUS_NOT_CHARGING :
+				POWER_SUPPLY_STATUS_DISCHARGING;
 		return 0;
 	}
 
@@ -316,7 +332,25 @@ static int max77705_get_battery_health(struct max77705_charger_data *chg,
 static int max77705_get_health(struct max77705_charger_data *chg, int *val)
 {
 	struct regmap *regmap = chg->regmap;
+	unsigned long block = READ_ONCE(chg->block);
 	int ret, is_online = 0;
+
+	if (block & BIT(MAX77705_BLOCK_HOT)) {
+		*val = POWER_SUPPLY_HEALTH_OVERHEAT;
+		return 0;
+	}
+	if (block & BIT(MAX77705_BLOCK_COLD)) {
+		*val = POWER_SUPPLY_HEALTH_COLD;
+		return 0;
+	}
+	if (block & BIT(MAX77705_BLOCK_TIMER)) {
+		*val = POWER_SUPPLY_HEALTH_SAFETY_TIMER_EXPIRE;
+		return 0;
+	}
+	if (block) {
+		*val = POWER_SUPPLY_HEALTH_UNSPEC_FAILURE;
+		return 0;
+	}
 
 	ret = max77705_get_online(regmap, &is_online);
 	if (ret)
@@ -413,7 +447,16 @@ static int max77705_chg_get_property(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE:
 		return max77705_get_float_voltage(chg, &val->intval);
 	case POWER_SUPPLY_PROP_VOLTAGE_MAX_DESIGN:
+		/* the supply is registered before the battery info is read */
+		if (!READ_ONCE(chg->bat_info))
+			return -ENODATA;
 		val->intval = chg->bat_info->voltage_max_design_uv;
+		break;
+	case POWER_SUPPLY_PROP_TEMP:
+		/* battery thermistor, as read by the safety monitor */
+		if (!chg->temp_chan || !READ_ONCE(chg->temp_valid))
+			return -ENODATA;
+		val->intval = READ_ONCE(chg->temp_mc) / 100;
 		break;
 	case POWER_SUPPLY_PROP_MODEL_NAME:
 		val->strval = max77705_charger_model;
@@ -432,26 +475,33 @@ static int max77705_set_property(struct power_supply *psy,
 				 const union power_supply_propval *val)
 {
 	struct max77705_charger_data *chg = power_supply_get_drvdata(psy);
+	unsigned int ua;
 	int err = 0;
 
+	if (val->intval < 0)
+		return -EINVAL;
+	ua = val->intval;
+
+	mutex_lock(&chg->lock);
 	switch (psp) {
 	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT:
-		err = max77705_set_integer(chg, MAX77705_CHG_CC_LIM,
-					   MAX77705_CURRENT_CHGIN_MIN,
-					   MAX77705_CURRENT_CHGIN_MAX,
-					   MAX77705_CURRENT_CHG_STEP,
-					   val->intval);
+		/* never above the battery's constant-charge-current-max */
+		if (chg->cc_max_ua)
+			ua = min(ua, chg->cc_max_ua);
+		err = regmap_field_write(chg->rfield[MAX77705_CHG_CC_LIM],
+					 max77705_cc_ua_to_reg(ua));
 		break;
 	case POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT:
-		err = max77705_set_integer(chg, MAX77705_CHG_CHGIN_LIM,
-					   MAX77705_CURRENT_CHGIN_MIN,
-					   MAX77705_CURRENT_CHGIN_MAX,
-					   MAX77705_CURRENT_CHGIN_STEP,
-					   val->intval);
+		/* never above input-current-limit-microamp */
+		if (chg->chgin_max_ua)
+			ua = min(ua, chg->chgin_max_ua);
+		err = regmap_field_write(chg->rfield[MAX77705_CHG_CHGIN_LIM],
+					 max77705_chgin_ua_to_reg(ua));
 		break;
 	default:
 		err = -EINVAL;
 	}
+	mutex_unlock(&chg->lock);
 
 	return err;
 };
@@ -483,6 +533,10 @@ static void max77705_chgin_isr_work(struct work_struct *work)
 	struct max77705_charger_data *chg =
 		container_of(work, struct max77705_charger_data, chgin_work);
 
+	/* re-evaluate at once on plug / unplug (resets the safety timer) */
+	if (READ_ONCE(chg->safety_ready))
+		mod_delayed_work(system_wq, &chg->safety_work, 0);
+
 	power_supply_changed(chg->psy_chg);
 }
 
@@ -503,6 +557,16 @@ static int max77705_charger_initialize(struct max77705_charger_data *chg)
 	err = regmap_field_write(chg->rfield[MAX77705_CHGPROT], MAX77705_CHGPROT_UNLOCKED);
 	if (err)
 		goto err;
+
+	/*
+	 * With the safety monitor, no charging while the limits are being
+	 * set: the monitor enables it once it has read the thermistor.
+	 */
+	if (chg->temp_chan) {
+		err = regmap_field_write(chg->rfield[MAX77705_CHG_EN], MAX77705_CHG_DISABLE);
+		if (err)
+			goto err;
+	}
 
 	err = regmap_field_write(chg->rfield[MAX77705_LX_SLOPE], MAX77705_SLOWEST_LX_SLOPE);
 	if (err)
@@ -555,11 +619,36 @@ static int max77705_charger_initialize(struct max77705_charger_data *chg)
 
 	/* cv voltage 4.2V or 4.35V */
 	/* MINVSYS 3.6V(default) */
-	if (info->voltage_max_design_uv < 0) {
+	if (info->constant_charge_voltage_max_uv > 0) {
+		err = max77705_set_float_voltage(chg, info->constant_charge_voltage_max_uv);
+	} else if (info->voltage_max_design_uv < 0) {
 		dev_warn(chg->dev, "missing battery:voltage-max-design-microvolt\n");
-		max77705_set_float_voltage(chg, 4200000);
+		err = max77705_set_float_voltage(chg, 4200000);
 	} else {
-		max77705_set_float_voltage(chg, info->voltage_max_design_uv);
+		err = max77705_set_float_voltage(chg, info->voltage_max_design_uv);
+	}
+	if (err)
+		goto err;
+	err = regmap_field_read(chg->rfield[MAX77705_CHG_CV_PRM], &chg->cv_reg);
+	if (err)
+		goto err;
+
+	/* fast charge current: the battery's constant-charge-current-max */
+	if (info->constant_charge_current_max_ua > 0) {
+		chg->cc_max_ua = info->constant_charge_current_max_ua;
+		err = regmap_field_write(chg->rfield[MAX77705_CHG_CC_LIM],
+					 max77705_cc_ua_to_reg(chg->cc_max_ua));
+		if (err)
+			goto err;
+	}
+
+	/* input current limit of CHGIN */
+	if (!device_property_read_u32(chg->dev, "input-current-limit-microamp",
+				      &chg->chgin_max_ua) && chg->chgin_max_ua) {
+		err = regmap_field_write(chg->rfield[MAX77705_CHG_CHGIN_LIM],
+					 max77705_chgin_ua_to_reg(chg->chgin_max_ua));
+		if (err)
+			goto err;
 	}
 
 	err = regmap_field_write(chg->rfield[MAX77705_VCHGIN], MAX77705_VCHGIN_4_5);
@@ -570,9 +659,23 @@ static int max77705_charger_initialize(struct max77705_charger_data *chg)
 	if (err)
 		goto err;
 
-	/* Watchdog timer */
-	regmap_update_bits(regmap, MAX77705_CHG_REG_CNFG_00,
-				MAX77705_WDTEN_MASK, 0);
+	/*
+	 * Watchdog timer. With the safety monitor it is on, as in the vendor
+	 * driver, and kicked by every check: if the kernel stops, the charger
+	 * stops charging (CHG_DTLS = watchdog expired) until it is kicked.
+	 */
+	if (chg->temp_chan) {
+		err = regmap_update_bits(regmap, MAX77705_CHG_REG_CNFG_06,
+					 MAX77705_WDTCLR_MASK, MAX77705_WDTCLR);
+		if (!err)
+			err = regmap_update_bits(regmap, MAX77705_CHG_REG_CNFG_00,
+						 MAX77705_WDTEN_MASK, MAX77705_WDTEN_MASK);
+		if (err)
+			goto err;
+	} else {
+		regmap_update_bits(regmap, MAX77705_CHG_REG_CNFG_00,
+				   MAX77705_WDTEN_MASK, 0);
+	}
 
 	/* VBYPSET=5.0V */
 	err = regmap_field_write(chg->rfield[MAX77705_VBYPSET], 0);
@@ -594,6 +697,169 @@ static int max77705_charger_initialize(struct max77705_charger_data *chg)
 err:
 	return dev_err_probe(chg->dev, err, "error while configuring");
 
+}
+
+/*
+ * Bring the limits back if something (watchdog reset, another writer) left a
+ * charge current, input limit or float voltage above ours. The AICL handler
+ * only lowers the input limit, so a lower value is kept.
+ */
+static bool max77705_safety_limits_ok(struct max77705_charger_data *chg)
+{
+	unsigned int cc, chgin, cv;
+
+	if (regmap_field_read(chg->rfield[MAX77705_CHG_CC_LIM], &cc) ||
+	    regmap_field_read(chg->rfield[MAX77705_CHG_CHGIN_LIM], &chgin) ||
+	    regmap_field_read(chg->rfield[MAX77705_CHG_CV_PRM], &cv))
+		return false;
+
+	return (!chg->cc_max_ua || cc <= max77705_cc_ua_to_reg(chg->cc_max_ua)) &&
+	       (!chg->chgin_max_ua || chgin <= max77705_chgin_ua_to_reg(chg->chgin_max_ua)) &&
+	       cv <= chg->cv_reg;
+}
+
+static void max77705_safety_restore_limits(struct max77705_charger_data *chg)
+{
+	dev_warn(chg->dev, "charge limits above the configured ones, rewriting them\n");
+
+	regmap_field_write(chg->rfield[MAX77705_CHGPROT], MAX77705_CHGPROT_UNLOCKED);
+	if (chg->cc_max_ua)
+		regmap_field_write(chg->rfield[MAX77705_CHG_CC_LIM],
+				   max77705_cc_ua_to_reg(chg->cc_max_ua));
+	if (chg->chgin_max_ua)
+		regmap_field_write(chg->rfield[MAX77705_CHG_CHGIN_LIM],
+				   max77705_chgin_ua_to_reg(chg->chgin_max_ua));
+	regmap_field_write(chg->rfield[MAX77705_CHG_CV_PRM], chg->cv_reg);
+}
+
+static void max77705_safety_check(struct max77705_charger_data *chg)
+{
+	struct power_supply_battery_info *info = chg->bat_info;
+	unsigned long block, old_block;
+	unsigned int dtls = 0, chg_en = 0, want;
+	int online = 0, temp = 0, ret;
+	u64 now, delta;
+
+	mutex_lock(&chg->lock);
+	block = old_block = chg->block;
+
+	/* 1. watchdog: note an expiry, then kick */
+	regmap_read(chg->regmap, MAX77705_CHG_REG_DETAILS_01, &dtls);
+	if ((dtls & MAX77705_CHG_DTLS) == MAX77705_CHG_DTLS_WDT_EXPIRED) {
+		if (!chg->wdt_expired_logged)
+			dev_warn(chg->dev, "charger watchdog had expired, kicking it\n");
+		chg->wdt_expired_logged = true;
+	} else {
+		chg->wdt_expired_logged = false;
+	}
+
+	ret = regmap_update_bits(chg->regmap, MAX77705_CHG_REG_CNFG_06,
+				 MAX77705_WDTCLR_MASK, MAX77705_WDTCLR);
+	if (ret)
+		dev_err(chg->dev, "watchdog kick failed: %d\n", ret);
+
+	/* 2. battery temperature, with the hysteresis of the vendor tables */
+	ret = iio_read_channel_processed(chg->temp_chan, &temp);
+	if (ret < 0 || temp <= MAX77705_TEMP_FAULT_LOW_MC ||
+	    temp >= MAX77705_TEMP_FAULT_HIGH_MC) {
+		block |= BIT(MAX77705_BLOCK_SENSOR);
+		WRITE_ONCE(chg->temp_valid, false);
+	} else {
+		block &= ~BIT(MAX77705_BLOCK_SENSOR);
+		WRITE_ONCE(chg->temp_mc, temp);
+		WRITE_ONCE(chg->temp_valid, true);
+
+		if (info->temp_alert_min > INT_MIN) {
+			int lo = info->temp_alert_min * 1000;
+
+			if (temp < lo)
+				block |= BIT(MAX77705_BLOCK_COLD);
+			else if (temp >= lo + MAX77705_TEMP_HYST_MC)
+				block &= ~BIT(MAX77705_BLOCK_COLD);
+		}
+		if (info->temp_alert_max < INT_MAX) {
+			int hi = info->temp_alert_max * 1000;
+
+			if (temp >= hi)
+				block |= BIT(MAX77705_BLOCK_HOT);
+			else if (temp <= hi - MAX77705_TEMP_HYST_MC)
+				block &= ~BIT(MAX77705_BLOCK_HOT);
+		}
+	}
+
+	/* 3. safety timer: charging time since the input was plugged in */
+	now = ktime_get_boottime_seconds();
+	delta = now - chg->last_check_s;
+	chg->last_check_s = now;
+
+	max77705_get_online(chg->regmap, &online);
+	regmap_read(chg->regmap, MAX77705_CHG_REG_DETAILS_01, &dtls);
+	dtls &= MAX77705_CHG_DTLS;
+	regmap_field_read(chg->rfield[MAX77705_CHG_EN], &chg_en);
+
+	if (!online) {
+		chg->charge_time_s = 0;
+		block &= ~BIT(MAX77705_BLOCK_TIMER);
+	} else if (chg_en && (dtls == 0 || dtls == MAX77705_CHARGER_CONSTANT_CURRENT ||
+			      dtls == MAX77705_CHARGER_CONSTANT_VOLTAGE)) {
+		chg->charge_time_s += delta;
+		if (chg->safety_timer_s && chg->charge_time_s >= chg->safety_timer_s)
+			block |= BIT(MAX77705_BLOCK_TIMER);
+	}
+
+	/* 4. limits */
+	if (!max77705_safety_limits_ok(chg)) {
+		max77705_safety_restore_limits(chg);
+		if (!max77705_safety_limits_ok(chg))
+			block |= BIT(MAX77705_BLOCK_LIMITS);
+		else
+			block &= ~BIT(MAX77705_BLOCK_LIMITS);
+	} else {
+		block &= ~BIT(MAX77705_BLOCK_LIMITS);
+	}
+
+	/* 5. apply */
+	want = block ? MAX77705_CHG_DISABLE : 1;
+	if (chg_en != want) {
+		ret = regmap_field_write(chg->rfield[MAX77705_CHG_EN], want);
+		if (!ret)
+			ret = regmap_field_read(chg->rfield[MAX77705_CHG_EN], &chg_en);
+		if (ret || chg_en != want)
+			dev_crit(chg->dev, "cannot set CHG_EN to %u (%d)\n", want, ret);
+	}
+
+	WRITE_ONCE(chg->block, block);
+	if (block != old_block) {
+		if (block)
+			dev_warn(chg->dev,
+				 "charging disabled: block 0x%lx, battery %d mC, %llu s charging\n",
+				 block, temp, chg->charge_time_s);
+		else
+			dev_info(chg->dev, "charging enabled, battery %d mC\n", temp);
+	}
+	mutex_unlock(&chg->lock);
+
+	if (block != old_block)
+		power_supply_changed(chg->psy_chg);
+}
+
+static void max77705_safety_work(struct work_struct *work)
+{
+	struct max77705_charger_data *chg =
+		container_of(to_delayed_work(work), struct max77705_charger_data,
+			     safety_work);
+
+	max77705_safety_check(chg);
+	queue_delayed_work(system_wq, &chg->safety_work,
+			   msecs_to_jiffies(MAX77705_SAFETY_POLL_MS));
+}
+
+static void max77705_safety_stop(void *data)
+{
+	struct max77705_charger_data *chg = data;
+
+	WRITE_ONCE(chg->safety_ready, false);
+	cancel_delayed_work_sync(&chg->safety_work);
 }
 
 static int max77705_charger_probe(struct i2c_client *i2c)
@@ -632,6 +898,21 @@ static int max77705_charger_probe(struct i2c_client *i2c)
 			return dev_err_probe(dev, PTR_ERR(chg->rfield[i]),
 					     "cannot allocate regmap field\n");
 	}
+
+	ret = devm_mutex_init(dev, &chg->lock);
+	if (ret)
+		return ret;
+	INIT_DELAYED_WORK(&chg->safety_work, max77705_safety_work);
+
+	chg->temp_chan = devm_iio_channel_get(dev, "battery-temp");
+	if (IS_ERR(chg->temp_chan)) {
+		ret = PTR_ERR(chg->temp_chan);
+		if (ret != -ENODEV)
+			return dev_err_probe(dev, ret, "cannot get the battery-temp channel\n");
+		chg->temp_chan = NULL;	/* no safety monitor */
+	}
+	if (chg->temp_chan)
+		device_property_read_u32(dev, "maxim,safety-timer-sec", &chg->safety_timer_s);
 
 	pscfg.fwnode = dev_fwnode(dev);
 	pscfg.drv_data = chg;
@@ -672,11 +953,36 @@ static int max77705_charger_probe(struct i2c_client *i2c)
 	if (ret)
 		return ret;
 
-	ret = max77705_charger_enable(chg);
-	if (ret)
-		return dev_err_probe(dev, ret, "failed to enable charge\n");
+	if (!chg->temp_chan) {
+		ret = max77705_charger_enable(chg);
+		if (ret)
+			return dev_err_probe(dev, ret, "failed to enable charge\n");
+	}
 
-	return devm_add_action_or_reset(dev, max77705_charger_disable, chg);
+	ret = devm_add_action_or_reset(dev, max77705_charger_disable, chg);
+	if (ret)
+		return ret;
+
+	if (!chg->temp_chan)
+		return 0;
+
+	/* runs before the disable action on unbind */
+	ret = devm_add_action_or_reset(dev, max77705_safety_stop, chg);
+	if (ret)
+		return ret;
+
+	chg->last_check_s = ktime_get_boottime_seconds();
+	max77705_safety_check(chg);	/* enables charging if everything is in range */
+	WRITE_ONCE(chg->safety_ready, true);
+	queue_delayed_work(system_wq, &chg->safety_work,
+			   msecs_to_jiffies(MAX77705_SAFETY_POLL_MS));
+
+	dev_info(dev, "safety monitor: CC %u uA, CHGIN %u uA, CV reg 0x%x, battery %d..%d C, timer %u s\n",
+		 chg->cc_max_ua, chg->chgin_max_ua, chg->cv_reg,
+		 chg->bat_info->temp_alert_min, chg->bat_info->temp_alert_max,
+		 chg->safety_timer_s);
+
+	return 0;
 }
 
 static const struct of_device_id max77705_charger_of_match[] = {

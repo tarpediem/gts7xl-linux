@@ -10,6 +10,10 @@
 #define __MAX77705_CHARGER_H __FILE__
 
 #include <linux/regmap.h>
+#include <linux/mutex.h>
+#include <linux/workqueue.h>
+
+struct iio_channel;
 
 /* MAX77705_CHG_REG_CHG_INT */
 #define MAX77705_BYP_I		(0)
@@ -180,6 +184,15 @@ static const struct reg_field max77705_reg_field[MAX77705_N_REGMAP_FIELDS] = {
 	[MAX77705_VCHGIN]		= REG_FIELD(MAX77705_CHG_REG_CNFG_12,   3, 4),
 };
 
+/* Reasons the safety monitor keeps charging disabled (bit numbers) */
+enum max77705_block {
+	MAX77705_BLOCK_COLD,
+	MAX77705_BLOCK_HOT,
+	MAX77705_BLOCK_SENSOR,
+	MAX77705_BLOCK_TIMER,
+	MAX77705_BLOCK_LIMITS,
+};
+
 struct max77705_charger_data {
 	struct device			*dev;
 	struct regmap		*regmap;
@@ -188,6 +201,27 @@ struct max77705_charger_data {
 	struct workqueue_struct *wqueue;
 	struct work_struct	chgin_work;
 	struct power_supply	*psy_chg;
+
+	/*
+	 * Optional safety monitor, active when a "battery-temp" IIO channel
+	 * is given: charging is enabled only while the battery thermistor is
+	 * inside the battery's alert-celsius window, the safety timer has not
+	 * run out and the limits below are in the registers.
+	 */
+	struct iio_channel	*temp_chan;
+	struct delayed_work	safety_work;
+	struct mutex		lock;
+	bool			safety_ready;
+	unsigned long		block;
+	unsigned int		cc_max_ua;
+	unsigned int		chgin_max_ua;
+	unsigned int		cv_reg;
+	unsigned int		safety_timer_s;
+	u64			charge_time_s;
+	u64			last_check_s;
+	int			temp_mc;
+	bool			temp_valid;
+	bool			wdt_expired_logged;
 };
 
 #endif /* __MAX77705_CHARGER_H */

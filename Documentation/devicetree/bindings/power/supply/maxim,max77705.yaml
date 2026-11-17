@@ -25,6 +25,29 @@ properties:
   reg:
     maxItems: 1
 
+  io-channels:
+    maxItems: 1
+    description:
+      Battery thermistor. When given, the driver enables charging only while
+      the temperature is inside the alert-celsius range of the monitored
+      battery (2 C hysteresis), runs the safety timer and keeps the charger
+      watchdog enabled and kicked.
+
+  io-channel-names:
+    const: battery-temp
+
+  input-current-limit-microamp:
+    description: Upper limit of the CHGIN input current.
+
+  maxim,safety-timer-sec:
+    description:
+      With the battery thermistor, stop charging after this much charging
+      time since the input was plugged in. 0 or absent disables the timer.
+
+dependencies:
+  io-channel-names: [ io-channels ]
+  maxim,safety-timer-sec: [ io-channels ]
+
 required:
   - compatible
   - reg
