@@ -159,8 +159,15 @@ int machine_kexec_post_load(struct kimage *kimage)
  * machine_kexec - Do the kexec reboot.
  *
  * Called from the core kexec code for a sys_reboot with LINUX_REBOOT_CMD_KEXEC.
+ *
+ * __nocfi: both calls below go through a physical address. With CONFIG_CFI,
+ * the indirect call to kern_reloc first loads the type hash 4 bytes before
+ * the target, in the page before the relocation page, which the idmap in
+ * TTBR0 does not map: a translation fault in machine_kexec(). The relocation
+ * code is copied from an untyped SYM_CODE block, so there is no hash to match
+ * anyway. swsusp_arch_resume() does the same for the same reason.
  */
-void machine_kexec(struct kimage *kimage)
+void __nocfi machine_kexec(struct kimage *kimage)
 {
 	bool in_kexec_crash = (kimage == kexec_crash_image);
 	bool stuck_cpus = cpus_are_stuck_in_kernel();
