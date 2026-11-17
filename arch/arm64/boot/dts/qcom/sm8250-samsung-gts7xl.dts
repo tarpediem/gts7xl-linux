@@ -327,16 +327,18 @@
  * no MUIC driver yet: the initramfs switches the USB data lines to the SoC
  * through /dev/i2c-N (MUIC at 0x25), so the bus only has to exist.
  */
-&gpi_dma0 {
-	status = "okay";
-};
-
 &i2c0 {
 	status = "okay";
 };
 
-/* Touchscreen bus: QUP SE5, 400 kHz as the stock geni driver's default */
+/*
+ * Touchscreen bus: QUP SE5, 400 kHz as the stock geni driver's default.
+ * FIFO/SE-DMA mode only: no GPI (gpi_dma0 stays disabled).
+ */
 &i2c5 {
+	/delete-property/ dmas;
+	/delete-property/ dma-names;
+
 	clock-frequency = <400000>;
 
 	status = "okay";
