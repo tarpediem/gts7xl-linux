@@ -598,6 +598,16 @@ config TOUCHSCREEN_WACOM_W8001
 	  To compile this driver as a module, choose M here: the
 	  module will be called wacom_w8001.
 
+config TOUCHSCREEN_WACOM_W90XX
+	tristate "Wacom W90xx EMR digitizer (Samsung I2C protocol)"
+	depends on I2C
+	help
+	  Say Y here for the Wacom W9021 pen digitizer of the Samsung
+	  Galaxy Tab S7+ (Samsung's I2C protocol, firmware in the chip).
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called wacom_w90xx.
+
 config TOUCHSCREEN_WACOM_I2C
 	tristate "Wacom Tablet support (I2C)"
 	depends on I2C
