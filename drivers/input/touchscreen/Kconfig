@@ -1251,6 +1251,17 @@ config TOUCHSCREEN_STMFTS
 	  To compile this driver as a module, choose M here: the
 	  module will be called stmfts.
 
+config TOUCHSCREEN_STMFTS1B
+	tristate "STMicroelectronics FTS1BA90A touchscreen"
+	depends on I2C
+	help
+	  Say Y here if you want support for the STMicroelectronics
+	  FTS1BA90A touchscreen controller, as found in the Samsung
+	  Galaxy Tab S7+.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called stmfts1b.
+
 config TOUCHSCREEN_STMPE
 	tristate "STMicroelectronics STMPE touchscreens"
 	depends on MFD_STMPE
