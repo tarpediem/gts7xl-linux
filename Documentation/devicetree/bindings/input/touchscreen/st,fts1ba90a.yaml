@@ -1,0 +1,67 @@
+# SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/input/touchscreen/st,fts1ba90a.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: STMicroelectronics FTS1BA90A touchscreen controller
+
+maintainers:
+  - tarpediem <tarpediem@gmail.com>
+
+description:
+  FingerTip touchscreen controller of the "fts1b" generation, as found in the
+  Samsung Galaxy Tab S7+. It uses another command set and event format than
+  the controllers covered by st,stmfts.yaml.
+
+allOf:
+  - $ref: touchscreen.yaml#
+
+properties:
+  compatible:
+    const: st,fts1ba90a
+
+  reg:
+    maxItems: 1
+
+  interrupts:
+    maxItems: 1
+
+  avdd-supply:
+    description: Analog power supply (3.3 V)
+
+  vdd-supply:
+    description: Digital power supply (1.8 V)
+
+required:
+  - compatible
+  - reg
+  - interrupts
+  - avdd-supply
+  - vdd-supply
+  - touchscreen-size-x
+  - touchscreen-size-y
+
+unevaluatedProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/interrupt-controller/irq.h>
+
+    i2c {
+        #address-cells = <1>;
+        #size-cells = <0>;
+
+        touchscreen@49 {
+            compatible = "st,fts1ba90a";
+            reg = <0x49>;
+            interrupt-parent = <&tlmm>;
+            interrupts = <15 IRQ_TYPE_LEVEL_LOW>;
+            avdd-supply = <&vreg_l13a_3p3>;
+            vdd-supply = <&vreg_l14a_1p8>;
+            touchscreen-size-x = <1752>;
+            touchscreen-size-y = <2800>;
+            touchscreen-inverted-x;
+            touchscreen-swapped-x-y;
+        };
+    };
