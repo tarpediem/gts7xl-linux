@@ -86,6 +86,13 @@ properties:
 
   dma-coherent: true
 
+  qcom,gpi-ee-offset:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description:
+      Offset subtracted from the register base to reach the registers of
+      the execution environment Linux runs in. Overrides the SoC default
+      when the firmware partitions the GSI differently.
+
 required:
   - compatible
   - reg
