@@ -15,8 +15,8 @@
  *   from bytes 5-6, height = byte 7, tilt x/y = bytes 8/9 (signed). Other
  *   packets (notifications, replies, pen garage) are ignored here.
  *
- * Axes are reported as the chip sends them, transformed by the generic
- * touchscreen-* properties.
+ * Axes are reported as the chip sends them, ranges from the query block,
+ * transformed by the generic touchscreen-* properties if any.
  */
 
 #include <linux/delay.h>
@@ -51,6 +51,8 @@ struct w90xx {
 	struct regulator *vdd;
 	struct gpio_desc *fwe_gpio;
 	struct touchscreen_properties props;
+	unsigned int max_x;
+	unsigned int max_y;
 	unsigned int max_pressure;
 	unsigned int max_tilt;
 	unsigned int max_height;
@@ -145,6 +147,8 @@ static int w90xx_query(struct w90xx *w)
 		return ret < 0 ? ret : -ENODEV;
 	}
 
+	w->max_x = get_unaligned_be16(&q[1]);
+	w->max_y = get_unaligned_be16(&q[3]);
 	w->max_pressure = get_unaligned_be16(&q[5]);
 	w->max_tilt = q[11];
 	w->max_height = q[13];
@@ -206,8 +210,9 @@ static int w90xx_probe(struct i2c_client *client)
 	input_set_capability(input, EV_KEY, BTN_TOOL_PEN);
 	input_set_capability(input, EV_KEY, BTN_TOOL_RUBBER);
 	input_set_capability(input, EV_KEY, BTN_STYLUS);
-	input_set_abs_params(input, ABS_X, 0, 0xffff, 4, 0);
-	input_set_abs_params(input, ABS_Y, 0, 0xffff, 4, 0);
+	/* Stock uses the ranges of the query, not its DT max_coords */
+	input_set_abs_params(input, ABS_X, 0, w->max_x, 4, 0);
+	input_set_abs_params(input, ABS_Y, 0, w->max_y, 4, 0);
 	input_set_abs_params(input, ABS_PRESSURE, 0, w->max_pressure, 0, 0);
 	input_set_abs_params(input, ABS_DISTANCE, 0, w->max_height, 0, 0);
 	input_set_abs_params(input, ABS_TILT_X, -(int)w->max_tilt, w->max_tilt, 0, 0);

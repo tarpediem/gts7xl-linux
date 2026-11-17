@@ -720,7 +720,8 @@
  * The chip reports in the panel's landscape frame (stock: y inverted, then
  * x/y swapped into Android's portrait frame, which the touchscreen undoes).
  * Stock: irq gpio136 (level low), flash-mode pin gpio6 (kept low), pen
- * detect gpio7 (not used here), max 22656 x 14160.
+ * detect gpio7 (not used here). Ranges come from the chip (26712 x 16714;
+ * the stock DT max_coords 22656 x 14160 are unused there: no use_dt_coord).
  */
 &i2c17 {
 	clock-frequency = <400000>;
@@ -737,9 +738,6 @@
 
 		pinctrl-names = "default";
 		pinctrl-0 = <&spen_int_default>;
-
-		touchscreen-size-x = <22656>;
-		touchscreen-size-y = <14160>;
 	};
 };
 
