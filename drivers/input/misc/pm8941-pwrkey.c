@@ -84,13 +84,10 @@ struct pm8941_pwrkey {
 	const struct pm8941_data *data;
 };
 
-static int pm8941_reboot_notify(struct notifier_block *nb,
-				unsigned long code, void *unused)
+static void pm8941_set_ps_hold_reset(struct pm8941_pwrkey *pwrkey,
+				     unsigned int reset_type)
 {
-	struct pm8941_pwrkey *pwrkey = container_of(nb, struct pm8941_pwrkey,
-						    reboot_notifier);
 	unsigned int enable_reg;
-	unsigned int reset_type;
 	int error;
 
 	/* PMICs with revision 0 have the enable bit in same register as ctrl */
@@ -114,20 +111,6 @@ static int pm8941_reboot_notify(struct notifier_block *nb,
 	 */
 	usleep_range(100, 1000);
 
-	switch (code) {
-	case SYS_HALT:
-	case SYS_POWER_OFF:
-		reset_type = PON_PS_HOLD_TYPE_SHUTDOWN;
-		break;
-	case SYS_RESTART:
-	default:
-		if (reboot_mode == REBOOT_WARM)
-			reset_type = PON_PS_HOLD_TYPE_WARM_RESET;
-		else
-			reset_type = PON_PS_HOLD_TYPE_HARD_RESET;
-		break;
-	}
-
 	error = regmap_update_bits(pwrkey->regmap,
 				   pwrkey->baseaddr + PON_PS_HOLD_RST_CTL,
 				   PON_PS_HOLD_TYPE_MASK,
@@ -142,6 +125,30 @@ static int pm8941_reboot_notify(struct notifier_block *nb,
 				   PON_PS_HOLD_ENABLE);
 	if (error)
 		dev_err(pwrkey->dev, "unable to re-set enable: %d\n", error);
+}
+
+static int pm8941_reboot_notify(struct notifier_block *nb,
+				unsigned long code, void *unused)
+{
+	struct pm8941_pwrkey *pwrkey = container_of(nb, struct pm8941_pwrkey,
+						    reboot_notifier);
+	unsigned int reset_type;
+
+	switch (code) {
+	case SYS_HALT:
+	case SYS_POWER_OFF:
+		reset_type = PON_PS_HOLD_TYPE_SHUTDOWN;
+		break;
+	case SYS_RESTART:
+	default:
+		if (reboot_mode == REBOOT_WARM)
+			reset_type = PON_PS_HOLD_TYPE_WARM_RESET;
+		else
+			reset_type = PON_PS_HOLD_TYPE_HARD_RESET;
+		break;
+	}
+
+	pm8941_set_ps_hold_reset(pwrkey, reset_type);
 
 	return NOTIFY_DONE;
 }
@@ -400,6 +407,17 @@ static int pm8941_pwrkey_probe(struct platform_device *pdev)
 			dev_err(&pdev->dev, "failed to register reboot notifier: %d\n",
 				error);
 			return error;
+		}
+
+		/*
+		 * A panic restarts through emergency_restart(), which does not
+		 * call the reboot notifiers. With reboot=warm, select the warm
+		 * reset now so that RAM (ramoops) survives that restart too.
+		 */
+		if (reboot_mode == REBOOT_WARM) {
+			pm8941_set_ps_hold_reset(pwrkey,
+						 PON_PS_HOLD_TYPE_WARM_RESET);
+			dev_info(&pdev->dev, "PS_HOLD reset type set to warm (reboot=warm)\n");
 		}
 	}
 
