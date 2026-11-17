@@ -334,18 +334,26 @@
  * no MUIC driver yet: the initramfs switches the USB data lines to the SoC
  * through /dev/i2c-N (MUIC at 0x25), so the bus only has to exist.
  */
+/*
+ * QUPv3_0 GPI, for i2c5. The stock tree uses an EE offset of 0x1000 here
+ * (qcom,gpi-ee-offset in the live DT); with the sm8250 default of 0 every
+ * GPI command times out on this board.
+ */
+&gpi_dma0 {
+	qcom,gpi-ee-offset = <0x1000>;
+
+	status = "okay";
+};
+
 &i2c0 {
 	status = "okay";
 };
 
 /*
  * Touchscreen bus: QUP SE5, 400 kHz as the stock geni driver's default.
- * FIFO/SE-DMA mode only: no GPI (gpi_dma0 stays disabled).
+ * The firmware runs SE5 in GSI mode (FIFO disabled), so it needs GPI DMA.
  */
 &i2c5 {
-	/delete-property/ dmas;
-	/delete-property/ dma-names;
-
 	clock-frequency = <400000>;
 
 	status = "okay";
