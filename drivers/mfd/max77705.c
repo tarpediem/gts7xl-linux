@@ -85,7 +85,7 @@ static int max77705_i2c_probe(struct i2c_client *i2c)
 	struct regmap_irq_chip_data *irq_data;
 	struct irq_domain *domain;
 	enum max77705_hw_rev pmic_rev;
-	unsigned int pmic_rev_value;
+	unsigned int pmic_rev_value, pmic_id;
 	int ret;
 
 	max77705 = devm_kzalloc(dev, sizeof(*max77705), GFP_KERNEL);
@@ -104,9 +104,22 @@ static int max77705_i2c_probe(struct i2c_client *i2c)
 	if (ret < 0)
 		return -ENODEV;
 
+	ret = regmap_read(max77705->regmap, MAX77705_PMIC_REG_PMICID1, &pmic_id);
+	if (ret < 0)
+		return -ENODEV;
+
+	/*
+	 * PASS3 as before, plus the MD15 die (PMICID1 0x15) at revision 2,
+	 * which the vendor driver lists as {0x15, 2, PASS5} and handles like
+	 * PASS2-PASS4 (same charger interrupt register read). Nothing else in
+	 * the MFD, charger or fuel gauge depends on the revision.
+	 */
 	pmic_rev = pmic_rev_value & MAX77705_REVISION_MASK;
-	if (pmic_rev != MAX77705_PASS3)
-		return dev_err_probe(dev, -ENODEV, "Rev.0x%x is not tested\n", pmic_rev);
+	if (pmic_rev != MAX77705_PASS3 &&
+	    !(pmic_id == MAX77705_PMICID_MD15 && pmic_rev == MAX77705_PASS2))
+		return dev_err_probe(dev, -ENODEV, "ID 0x%x Rev.0x%x is not tested\n",
+				     pmic_id, pmic_rev);
+	dev_info(dev, "PMIC ID 0x%x, revision 0x%x\n", pmic_id, pmic_rev);
 
 	/* Active Discharge Enable */
 	regmap_update_bits(max77705->regmap, MAX77705_PMIC_REG_MAINCTRL1, 1, 1);
