@@ -293,11 +293,18 @@
 			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
 		};
 
-		/* touchscreen AVDD ("pm8150_l13" in the stock touch node) */
+		/*
+		 * Touchscreen AVDD ("pm8150_l13" in the stock touch node).
+		 * Stock asks 3300000 uV, which is not on the PMIC5 PLDO grid
+		 * (1504000 + n * 8000): mainline rejects it and the whole
+		 * regulator device fails to probe. 3296000 is the nearest
+		 * step below (the PMIC has no 3.300 V step: whatever the stock
+		 * 3300 mV request lands on is a grid value too).
+		 */
 		vreg_l13a_3p3: ldo13 {
 			regulator-name = "vreg_l13a_3p3";
-			regulator-min-microvolt = <3300000>;
-			regulator-max-microvolt = <3300000>;
+			regulator-min-microvolt = <3296000>;
+			regulator-max-microvolt = <3296000>;
 			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
 		};
 
