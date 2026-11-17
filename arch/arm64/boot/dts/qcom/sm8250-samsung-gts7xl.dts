@@ -1,0 +1,27 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/*
+ * Samsung Galaxy Tab S7+ 5G (SM-T976B, gts7xl) — phase 0 skeleton.
+ * Phase 1 adds reserved-memory, regulators, UFS, USB, simple-framebuffer, keys, ramoops.
+ */
+/dts-v1/;
+
+#include "sm8250.dtsi"
+#include "pm8150.dtsi"
+#include "pm8150b.dtsi"
+#include "pm8150l.dtsi"
+
+/ {
+	model = "Samsung Galaxy Tab S7+ 5G";
+	compatible = "samsung,gts7xl", "qcom,sm8250";
+	chassis-type = "tablet";
+
+	/* Values copied from reference/ids.txt (stock T976BXXS7DXH1). */
+	qcom,msm-id = <0x164 0x20001>;
+	qcom,board-id = <0 0>, <8 0>, <8 1>, <8 2>, <8 3>, <8 4>, <8 5>, <8 6>;
+
+	chosen {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+	};
+};
