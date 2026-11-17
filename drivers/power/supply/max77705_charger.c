@@ -30,6 +30,8 @@ static const char *max77705_charger_manufacturer	= "Maxim Integrated";
 #define MAX77705_TEMP_FAULT_LOW_MC	(-35000) /* open or shorted thermistor */
 #define MAX77705_TEMP_FAULT_HIGH_MC	95000
 #define MAX77705_CHG_DTLS_WDT_EXPIRED	0x0b
+#define MAX77705_SOC_END_DEFAULT	80	/* % of capacity, battery longevity */
+#define MAX77705_SOC_START_DEFAULT	75
 
 static const struct regmap_config max77705_chg_regmap_config = {
 	.reg_base = MAX77705_CHG_REG_BASE,
@@ -50,6 +52,8 @@ static enum power_supply_property max77705_charger_props[] = {
 	POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT,
 	POWER_SUPPLY_PROP_TEMP,
 	POWER_SUPPLY_PROP_CHARGE_BEHAVIOUR,
+	POWER_SUPPLY_PROP_CHARGE_CONTROL_START_THRESHOLD,
+	POWER_SUPPLY_PROP_CHARGE_CONTROL_END_THRESHOLD,
 };
 
 #define MAX77705_CHGIN_LIM_REG_MIN	3	/* 100 mA, the lowest input limit */
@@ -378,7 +382,7 @@ static int max77705_get_health(struct max77705_charger_data *chg, int *val)
 		*val = POWER_SUPPLY_HEALTH_SAFETY_TIMER_EXPIRE;
 		return 0;
 	}
-	if (block & ~BIT(MAX77705_BLOCK_USER)) {
+	if (block & ~(BIT(MAX77705_BLOCK_USER) | BIT(MAX77705_BLOCK_SOC))) {
 		*val = POWER_SUPPLY_HEALTH_UNSPEC_FAILURE;
 		return 0;
 	}
@@ -504,6 +508,16 @@ static int max77705_chg_get_property(struct power_supply *psy,
 			POWER_SUPPLY_CHARGE_BEHAVIOUR_INHIBIT_CHARGE :
 			POWER_SUPPLY_CHARGE_BEHAVIOUR_AUTO;
 		break;
+	case POWER_SUPPLY_PROP_CHARGE_CONTROL_START_THRESHOLD:
+		if (!chg->temp_chan)
+			return -ENODATA;
+		val->intval = READ_ONCE(chg->soc_start);
+		break;
+	case POWER_SUPPLY_PROP_CHARGE_CONTROL_END_THRESHOLD:
+		if (!chg->temp_chan)
+			return -ENODATA;
+		val->intval = READ_ONCE(chg->soc_end);
+		break;
 	case POWER_SUPPLY_PROP_MODEL_NAME:
 		val->strval = max77705_charger_model;
 		break;
@@ -542,6 +556,26 @@ static int max77705_set_property(struct power_supply *psy,
 		return 0;
 	}
 
+	if (psp == POWER_SUPPLY_PROP_CHARGE_CONTROL_START_THRESHOLD ||
+	    psp == POWER_SUPPLY_PROP_CHARGE_CONTROL_END_THRESHOLD) {
+		if (!chg->temp_chan)
+			return -EOPNOTSUPP;
+		mutex_lock(&chg->lock);
+		/* start < end, both within 0..100 */
+		if (psp == POWER_SUPPLY_PROP_CHARGE_CONTROL_START_THRESHOLD &&
+		    val->intval >= 0 && val->intval < chg->soc_end)
+			chg->soc_start = val->intval;
+		else if (psp == POWER_SUPPLY_PROP_CHARGE_CONTROL_END_THRESHOLD &&
+			 val->intval > chg->soc_start && val->intval <= 100)
+			chg->soc_end = val->intval;
+		else
+			err = -EINVAL;
+		if (!err && chg->safety_ready)
+			mod_delayed_work(system_wq, &chg->safety_work, 0);
+		mutex_unlock(&chg->lock);
+		return err;
+	}
+
 	if (val->intval < 0)
 		return -EINVAL;
 	ua = val->intval;
@@ -577,6 +611,8 @@ static int max77705_property_is_writeable(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT:
 	case POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT:
 	case POWER_SUPPLY_PROP_CHARGE_BEHAVIOUR:
+	case POWER_SUPPLY_PROP_CHARGE_CONTROL_START_THRESHOLD:
+	case POWER_SUPPLY_PROP_CHARGE_CONTROL_END_THRESHOLD:
 		return true;
 	default:
 		return false;
@@ -894,7 +930,30 @@ static void max77705_safety_check(struct max77705_charger_data *chg)
 		}
 	}
 
-	/* 2b. safety timer: charging time since the input was plugged in */
+	/*
+	 * 2b. capacity window (fuel gauge): stop at soc_end, resume below
+	 * soc_start. No fuel gauge or a read error: no charging.
+	 */
+	if (!chg->fg_psy)
+		chg->fg_psy = power_supply_get_by_name("max170xx_battery");
+	if (chg->fg_psy) {
+		union power_supply_propval pv;
+
+		if (power_supply_get_property(chg->fg_psy, POWER_SUPPLY_PROP_CAPACITY, &pv) ||
+		    pv.intval < 0 || pv.intval > 100) {
+			block |= BIT(MAX77705_BLOCK_IO);
+		} else {
+			chg->soc = pv.intval;
+			if (pv.intval >= chg->soc_end)
+				block |= BIT(MAX77705_BLOCK_SOC);
+			else if (pv.intval < chg->soc_start)
+				block &= ~BIT(MAX77705_BLOCK_SOC);
+		}
+	} else {
+		block |= BIT(MAX77705_BLOCK_IO);
+	}
+
+	/* 2c. safety timer: charging time since the input was plugged in */
 	now = ktime_get_boottime_seconds();
 	delta = now - chg->last_check_s;
 	chg->last_check_s = now;
@@ -964,10 +1023,11 @@ static void max77705_safety_check(struct max77705_charger_data *chg)
 	if (block != old_block) {
 		if (block)
 			dev_warn(chg->dev,
-				 "charging disabled: block 0x%lx, battery %d mC, %llu s charging\n",
-				 block, temp, chg->charge_time_s);
+				 "charging disabled: block 0x%lx, battery %d mC, %d %%, %llu s charging\n",
+				 block, temp, chg->soc, chg->charge_time_s);
 		else
-			dev_info(chg->dev, "charging enabled, battery %d mC\n", temp);
+			dev_info(chg->dev, "charging enabled, battery %d mC, %d %%\n",
+				 temp, chg->soc);
 	}
 
 	if (chg->safety_ready)
@@ -999,6 +1059,10 @@ static void max77705_safety_stop(void *data)
 	cancel_delayed_work_sync(&chg->safety_work);
 	/* chgin_work only re-queues while safety_ready; let a running one end */
 	flush_work(&chg->chgin_work);
+	if (chg->fg_psy) {
+		power_supply_put(chg->fg_psy);
+		chg->fg_psy = NULL;
+	}
 }
 
 static int max77705_charger_probe(struct i2c_client *i2c)
@@ -1052,6 +1116,9 @@ static int max77705_charger_probe(struct i2c_client *i2c)
 	}
 	if (chg->temp_chan)
 		device_property_read_u32(dev, "maxim,safety-timer-sec", &chg->safety_timer_s);
+	chg->soc_end = MAX77705_SOC_END_DEFAULT;
+	chg->soc_start = MAX77705_SOC_START_DEFAULT;
+	chg->soc = -1;
 
 	pscfg.fwnode = dev_fwnode(dev);
 	pscfg.drv_data = chg;
@@ -1117,10 +1184,10 @@ static int max77705_charger_probe(struct i2c_client *i2c)
 	/* first check now: enables charging if everything is in range */
 	mod_delayed_work(system_wq, &chg->safety_work, 0);
 
-	dev_info(dev, "safety monitor: CC %u uA, CHGIN %u uA, CV reg 0x%x, battery %d..%d C, timer %u s\n",
+	dev_info(dev, "safety monitor: CC %u uA, CHGIN %u uA, CV reg 0x%x, battery %d..%d C, timer %u s, capacity %d..%d %%\n",
 		 chg->cc_max_ua, chg->chgin_max_ua, chg->cv_reg,
 		 chg->bat_info->temp_alert_min, chg->bat_info->temp_alert_max,
-		 chg->safety_timer_s);
+		 chg->safety_timer_s, chg->soc_start, chg->soc_end);
 
 	return 0;
 }

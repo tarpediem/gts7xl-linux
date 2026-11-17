@@ -193,6 +193,7 @@ enum max77705_block {
 	MAX77705_BLOCK_LIMITS,
 	MAX77705_BLOCK_IO,	/* a register could not be read */
 	MAX77705_BLOCK_USER,	/* charge_behaviour = inhibit-charge */
+	MAX77705_BLOCK_SOC,	/* capacity reached charge_control_end_threshold */
 };
 
 struct max77705_charger_data {
@@ -215,6 +216,10 @@ struct max77705_charger_data {
 	struct mutex		lock;
 	bool			safety_ready;
 	bool			user_inhibit;
+	struct power_supply	*fg_psy;	/* battery, for the capacity window */
+	int			soc_start;	/* resume below this capacity, % */
+	int			soc_end;	/* stop at or above this capacity, % */
+	int			soc;
 	unsigned long		block;
 	unsigned int		cc_max_ua;
 	unsigned int		chgin_max_ua;
