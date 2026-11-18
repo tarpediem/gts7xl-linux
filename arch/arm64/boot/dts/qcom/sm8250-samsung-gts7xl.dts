@@ -404,6 +404,19 @@
 	firmware-name = "qcom/sm8250/samsung/gts7xl/adsp.mbn";
 
 	status = "okay";
+
+	/*
+	 * No remote heap for the ADSP FastRPC channel (nothing here uses ADSP
+	 * FastRPC): its probe hands the heap to the LPASS VMs with an SCM call;
+	 * after a kexec the heap still belongs to them, the call fails (-22) and
+	 * the channel probe loops (~70000 errors per boot).
+	 */
+	glink-edge {
+		fastrpc {
+			/delete-property/ memory-region;
+			/delete-property/ qcom,vmids;
+		};
+	};
 };
 
 &apps_rsc {
