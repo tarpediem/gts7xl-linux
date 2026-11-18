@@ -46,6 +46,19 @@ properties:
       every other cable, or an unreadable status, gets
       input-current-limit-microamp.
 
+  maxim,typec-1500ma-input-current-limit-microamp:
+    description:
+      With the battery thermistor and DCP detection, input limit used while
+      the USB-C block reports the tablet as the sink of a source advertising
+      1.5 A (Type-C Rp); the larger of this and the BC1.2 value applies.
+    maximum: 1400000
+
+  maxim,typec-3000ma-input-current-limit-microamp:
+    description:
+      As maxim,typec-1500ma-input-current-limit-microamp, for a source
+      advertising 3.0 A.
+    maximum: 3000000
+
   maxim,dcp-constant-charge-current-microamp:
     description:
       With the battery thermistor and DCP detection, charge current used
@@ -64,6 +77,8 @@ dependencies:
   maxim,safety-timer-sec: [ io-channels ]
   maxim,dcp-input-current-limit-microamp: [ io-channels, input-current-limit-microamp ]
   maxim,dcp-constant-charge-current-microamp: [ maxim,dcp-input-current-limit-microamp ]
+  maxim,typec-1500ma-input-current-limit-microamp: [ maxim,dcp-input-current-limit-microamp ]
+  maxim,typec-3000ma-input-current-limit-microamp: [ maxim,dcp-input-current-limit-microamp ]
 
 required:
   - compatible

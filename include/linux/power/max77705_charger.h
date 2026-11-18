@@ -227,6 +227,9 @@ struct max77705_charger_data {
 	unsigned int		chgin_max_ua;	/* reference input limit now (per cable) */
 	unsigned int		chgin_sdp_ua;	/* default: USB SDP, CDP, unknown */
 	unsigned int		chgin_dcp_ua;	/* BC1.2 DCP detected; 0 = not used */
+	unsigned int		chgin_typec15_ua; /* Type-C Rp 1.5 A seen; 0 = not used */
+	unsigned int		chgin_typec30_ua; /* Type-C Rp 3.0 A seen; 0 = not used */
+	unsigned int		typec_adv_ma;	/* last Type-C advertisement used, 0 = none */
 	struct i2c_adapter	*usbc_adap;	/* USB-C block, read only, not claimed */
 	int			usb_type;
 	unsigned int		cv_reg;		/* encoded target, from DT */
