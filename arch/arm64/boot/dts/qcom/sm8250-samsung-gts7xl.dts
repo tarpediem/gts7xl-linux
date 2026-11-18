@@ -654,10 +654,13 @@
 		input-current-limit-microamp = <475000>;
 		/*
 		 * Wall charger (BC1.2 DCP, read from the USB-C block): 1800 mA,
-		 * the stock cable-info default_input_current (0x708). Battery-side
-		 * limits are unchanged; anything not positively a DCP gets 475 mA.
+		 * the stock cable-info default_input_current (0x708), and 1500 mA
+		 * charge current. Anything not positively a DCP gets 475 mA input
+		 * and the battery's 450 mA. CV, temperatures, timer unchanged.
 		 */
 		maxim,dcp-input-current-limit-microamp = <1800000>;
+		/* stock charges at 2100 mA on a TA (cable-info default_charging_current) */
+		maxim,dcp-constant-charge-current-microamp = <1500000>;
 		maxim,safety-timer-sec = <36000>;
 	};
 
