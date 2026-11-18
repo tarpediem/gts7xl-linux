@@ -32,6 +32,7 @@
 
 #define W90XX_CMD_SAMPLE_STOP	0x30
 #define W90XX_CMD_SAMPLE_START	0x31
+#define W90XX_CMD_SURVEY_EXIT	0x2d
 
 #define W90XX_COORD_LEN		17
 #define W90XX_QUERY_POS		16
@@ -92,8 +93,10 @@ static irqreturn_t w90xx_irq(int irq, void *data)
 		return IRQ_HANDLED;
 	}
 
-	if ((buf[0] & 0x0f) != W90XX_PKT_COORD)
+	if ((buf[0] & 0x0f) != W90XX_PKT_COORD) {
+		dev_info_ratelimited(&w->client->dev, "packet %*ph\n", 8, buf);
 		return IRQ_HANDLED;
+	}
 
 	if (!(buf[0] & W90XX_RDY)) {
 		w90xx_release(w);
@@ -185,13 +188,22 @@ static int w90xx_probe(struct i2c_client *client)
 	if (IS_ERR(w->vdd))
 		return dev_err_probe(dev, PTR_ERR(w->vdd), "vdd supply\n");
 
+	/*
+	 * The supply is on from the bootloader (or from the kernel before a
+	 * kexec, which may have left the chip in a survey mode): power cycle
+	 * like the Samsung driver's reset (off, 100 ms, on, 200 ms).
+	 */
+	ret = regulator_enable(w->vdd);
+	if (ret)
+		return ret;
+	regulator_disable(w->vdd);
+	msleep(100);
 	ret = regulator_enable(w->vdd);
 	if (ret)
 		return ret;
 	ret = devm_add_action_or_reset(dev, w90xx_power_off, w);
 	if (ret)
 		return ret;
-	/* Samsung driver: 200 ms after power-up before the first read */
 	msleep(200);
 
 	ret = w90xx_query(w);
@@ -213,6 +225,9 @@ static int w90xx_probe(struct i2c_client *client)
 	/* Stock uses the ranges of the query, not its DT max_coords */
 	input_set_abs_params(input, ABS_X, 0, w->max_x, 4, 0);
 	input_set_abs_params(input, ABS_Y, 0, w->max_y, 4, 0);
+	/* 12.4" 2800x1752 panel, about 267 x 167 mm: 100 units/mm */
+	input_abs_set_res(input, ABS_X, 100);
+	input_abs_set_res(input, ABS_Y, 100);
 	input_set_abs_params(input, ABS_PRESSURE, 0, w->max_pressure, 0, 0);
 	input_set_abs_params(input, ABS_DISTANCE, 0, w->max_height, 0, 0);
 	input_set_abs_params(input, ABS_TILT_X, -(int)w->max_tilt, w->max_tilt, 0, 0);
@@ -229,6 +244,11 @@ static int w90xx_probe(struct i2c_client *client)
 	if (ret)
 		return ret;
 
+	/* Leave any survey (garage-only) mode, then start sampling */
+	ret = w90xx_send(w, W90XX_CMD_SURVEY_EXIT);
+	if (ret)
+		return dev_err_probe(dev, ret, "survey exit command\n");
+	msleep(50);
 	ret = w90xx_send(w, W90XX_CMD_SAMPLE_START);
 	if (ret)
 		return dev_err_probe(dev, ret, "start command\n");
