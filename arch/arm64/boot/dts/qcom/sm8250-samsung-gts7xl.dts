@@ -661,6 +661,14 @@
 		maxim,dcp-input-current-limit-microamp = <1800000>;
 		/* stock charges at 2100 mA on a TA (cable-info default_charging_current) */
 		maxim,dcp-constant-charge-current-microamp = <1500000>;
+		/*
+		 * Type-C current advertisement (sink, VBUS present): stock
+		 * rp_current_rp2 0x578 = 1400 mA, rp_current_rp3 0xbb8 = 3000 mA.
+		 * The larger of this and the BC1.2 value is the input limit; the
+		 * charge current still follows BC1.2 only.
+		 */
+		maxim,typec-1500ma-input-current-limit-microamp = <1400000>;
+		maxim,typec-3000ma-input-current-limit-microamp = <3000000>;
 		maxim,safety-timer-sec = <36000>;
 	};
 
@@ -923,6 +931,14 @@
 		qcom,ratiometric;
 		qcom,hw-settle-time = <200>;
 		label = "batt_therm";
+	};
+
+	/* charger thermistor (stock battery io-channel "adc-chg-temp"), read only */
+	channel@4f {
+		reg = <ADC5_AMUX_THM3_100K_PU>;
+		qcom,ratiometric;
+		qcom,hw-settle-time = <200>;
+		label = "chg_therm";
 	};
 };
 
