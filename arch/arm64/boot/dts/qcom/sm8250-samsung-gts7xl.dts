@@ -669,6 +669,9 @@
 		 */
 		maxim,typec-1500ma-input-current-limit-microamp = <1400000>;
 		maxim,typec-3000ma-input-current-limit-microamp = <3000000>;
+		/* data role from the USB-C attach state; VBUS output off until enabled */
+		usb-role-switch = <&usb_1_dwc3>;
+		maxim,otg-min-capacity-percent = <15>;
 		maxim,safety-timer-sec = <36000>;
 	};
 
@@ -1307,7 +1310,14 @@
 };
 
 &usb_1_dwc3 {
-	dr_mode = "peripheral";
+	/*
+	 * Dual role: device by default (gadget networking with a PC); the
+	 * charger driver sets host when the USB-C block reports a sink
+	 * attached (OTG adapter, hub), or by hand in /sys/class/usb_role.
+	 */
+	dr_mode = "otg";
+	usb-role-switch;
+	role-switch-default-mode = "peripheral";
 	maximum-speed = "high-speed";
 	phys = <&usb_1_hsphy>;
 	phy-names = "usb2-phy";
