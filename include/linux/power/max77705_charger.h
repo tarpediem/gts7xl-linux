@@ -13,6 +13,8 @@
 #include <linux/mutex.h>
 #include <linux/workqueue.h>
 
+struct usb_role_switch;
+
 struct iio_channel;
 
 /* MAX77705_CHG_REG_CHG_INT */
@@ -230,6 +232,23 @@ struct max77705_charger_data {
 	unsigned int		chgin_typec15_ua; /* Type-C Rp 1.5 A seen; 0 = not used */
 	unsigned int		chgin_typec30_ua; /* Type-C Rp 3.0 A seen; 0 = not used */
 	unsigned int		typec_adv_ma;	/* last Type-C advertisement used, 0 = none */
+
+	/*
+	 * USB-C data role and VBUS output (optional, needs the safety monitor,
+	 * the USB-C block and a "usb-role-switch" reference). All under lock.
+	 */
+	struct usb_role_switch	*role_sw;
+	struct delayed_work	usbc_work;
+	bool			usbc_ready;
+	bool			role_auto;	/* follow the USB-C attach state */
+	int			cc_stat;	/* debounced CCStat, -1 unknown */
+	int			cc_stat_seen;	/* last raw CCStat */
+	int			cc_stat_count;	/* consecutive equal reads */
+	bool			otg_vbus_auto;	/* boost allowed (sysfs, default off) */
+	bool			boost_on;	/* we turned the OTG boost on */
+	bool			boost_fault;	/* tripped: no boost until detach */
+	unsigned int		otg_soc_min;	/* no boost below this capacity, % */
+	unsigned long		boost_offs;
 	struct i2c_adapter	*usbc_adap;	/* USB-C block, read only, not claimed */
 	int			usb_type;
 	unsigned int		cv_reg;		/* encoded target, from DT */

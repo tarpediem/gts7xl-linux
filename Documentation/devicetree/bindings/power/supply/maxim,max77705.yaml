@@ -59,6 +59,21 @@ properties:
       advertising 3.0 A.
     maximum: 3000000
 
+  usb-role-switch:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description:
+      USB role switch (the USB controller) to set from the USB-C block's
+      attach state: host while a sink is attached, device otherwise. With
+      it, the charger can also supply VBUS (OTG boost, 900 mA) to an
+      attached sink, off until enabled from userspace.
+
+  maxim,otg-min-capacity-percent:
+    description:
+      No VBUS output below this battery capacity.
+    minimum: 5
+    maximum: 100
+    default: 15
+
   maxim,dcp-constant-charge-current-microamp:
     description:
       With the battery thermistor and DCP detection, charge current used
@@ -79,6 +94,8 @@ dependencies:
   maxim,dcp-constant-charge-current-microamp: [ maxim,dcp-input-current-limit-microamp ]
   maxim,typec-1500ma-input-current-limit-microamp: [ maxim,dcp-input-current-limit-microamp ]
   maxim,typec-3000ma-input-current-limit-microamp: [ maxim,dcp-input-current-limit-microamp ]
+  usb-role-switch: [ maxim,dcp-input-current-limit-microamp ]
+  maxim,otg-min-capacity-percent: [ usb-role-switch ]
 
 required:
   - compatible
