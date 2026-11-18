@@ -40,6 +40,12 @@ static const char *max77705_charger_manufacturer	= "Maxim Integrated";
 #define MAX77705_BC_VBUSDET		BIT(7)
 #define MAX77705_SOC_END_DEFAULT	80	/* % of capacity, battery longevity */
 #define MAX77705_SOC_START_DEFAULT	75
+/*
+ * Highest charge current on a positively detected DCP. Stock charges at
+ * 2100 mA on a Samsung TA (cable-info default_charging_current); this stays
+ * well below it.
+ */
+#define MAX77705_CC_DCP_CEIL_UA	1500000
 
 static const struct regmap_config max77705_chg_regmap_config = {
 	.reg_base = MAX77705_CHG_REG_BASE,
@@ -764,6 +770,7 @@ static int max77705_charger_initialize(struct max77705_charger_data *chg)
 	/* fast charge current: the battery's constant-charge-current-max */
 	if (info->constant_charge_current_max_ua > 0) {
 		chg->cc_max_ua = info->constant_charge_current_max_ua;
+		chg->cc_sdp_ua = chg->cc_max_ua;
 		err = max77705_write_verify(chg, MAX77705_CHG_CC_LIM,
 					    max77705_cc_ua_to_reg(chg->cc_max_ua));
 		if (err)
@@ -861,6 +868,20 @@ static unsigned int max77705_cable_input_limit(struct max77705_charger_data *chg
 	}
 	WRITE_ONCE(chg->usb_type, type);
 	return ua;
+}
+
+/*
+ * Charge current for the cable just read by max77705_cable_input_limit():
+ * the DCP value only on a positively detected DCP, the battery's
+ * constant-charge-current-max otherwise.
+ */
+static unsigned int max77705_cable_charge_current(struct max77705_charger_data *chg,
+						  bool online)
+{
+	if (online && chg->cc_dcp_ua &&
+	    READ_ONCE(chg->usb_type) == POWER_SUPPLY_USB_TYPE_DCP)
+		return chg->cc_dcp_ua;
+	return chg->cc_sdp_ua;
 }
 
 /*
@@ -1049,6 +1070,24 @@ static void max77705_safety_check(struct max77705_charger_data *chg)
 		}
 	}
 
+	/*
+	 * 2e. charge current for the attached cable, read from the same
+	 * BC_STATUS result. Written on a change only; the check below keeps
+	 * the register at or under the reference.
+	 */
+	if (chg->cc_sdp_ua) {
+		unsigned int ref = max77705_cable_charge_current(chg, online);
+
+		if (ref != chg->cc_max_ua) {
+			dev_info(chg->dev, "charge current %u uA (USB type %d)\n", ref,
+				 READ_ONCE(chg->usb_type));
+			chg->cc_max_ua = ref;
+			if (regmap_field_write(chg->rfield[MAX77705_CHG_CC_LIM],
+					       max77705_cc_ua_to_reg(ref)))
+				block |= BIT(MAX77705_BLOCK_IO);
+		}
+	}
+
 	/* 3. limits */
 	lim = max77705_safety_limits_ok(chg);
 	if (lim == 0) {
@@ -1192,6 +1231,14 @@ static int max77705_charger_probe(struct i2c_client *i2c)
 	    !device_property_read_u32(dev, "maxim,dcp-input-current-limit-microamp",
 				      &chg->chgin_dcp_ua))
 		chg->usbc_adap = i2c->adapter;
+	if (chg->usbc_adap &&
+	    !device_property_read_u32(dev, "maxim,dcp-constant-charge-current-microamp",
+				      &chg->cc_dcp_ua) &&
+	    chg->cc_dcp_ua > MAX77705_CC_DCP_CEIL_UA) {
+		dev_warn(dev, "DCP charge current %u uA above %u uA, not used\n",
+			 chg->cc_dcp_ua, MAX77705_CC_DCP_CEIL_UA);
+		chg->cc_dcp_ua = 0;
+	}
 	chg->usb_type = POWER_SUPPLY_USB_TYPE_UNKNOWN;
 	chg->soc_end = MAX77705_SOC_END_DEFAULT;
 	chg->soc_start = MAX77705_SOC_START_DEFAULT;
@@ -1261,8 +1308,8 @@ static int max77705_charger_probe(struct i2c_client *i2c)
 	/* first check now: enables charging if everything is in range */
 	mod_delayed_work(system_wq, &chg->safety_work, 0);
 
-	dev_info(dev, "safety monitor: CC %u uA, CHGIN %u uA (DCP %u uA), CV reg 0x%x, battery %d..%d C, timer %u s, capacity %d..%d %%\n",
-		 chg->cc_max_ua, chg->chgin_sdp_ua, chg->chgin_dcp_ua, chg->cv_reg,
+	dev_info(dev, "safety monitor: CC %u uA (DCP %u uA), CHGIN %u uA (DCP %u uA), CV reg 0x%x, battery %d..%d C, timer %u s, capacity %d..%d %%\n",
+		 chg->cc_sdp_ua, chg->cc_dcp_ua, chg->chgin_sdp_ua, chg->chgin_dcp_ua, chg->cv_reg,
 		 chg->bat_info->temp_alert_min, chg->bat_info->temp_alert_max,
 		 chg->safety_timer_s, chg->soc_start, chg->soc_end);
 

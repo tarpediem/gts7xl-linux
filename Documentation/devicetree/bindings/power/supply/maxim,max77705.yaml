@@ -46,6 +46,14 @@ properties:
       every other cable, or an unreadable status, gets
       input-current-limit-microamp.
 
+  maxim,dcp-constant-charge-current-microamp:
+    description:
+      With the battery thermistor and DCP detection, charge current used
+      only while a dedicated charging port is detected; every other cable,
+      or an unreadable status, gets the battery's
+      constant-charge-current-max-microamp.
+    maximum: 1500000
+
   maxim,safety-timer-sec:
     description:
       With the battery thermistor, stop charging after this much charging
@@ -55,6 +63,7 @@ dependencies:
   io-channel-names: [ io-channels ]
   maxim,safety-timer-sec: [ io-channels ]
   maxim,dcp-input-current-limit-microamp: [ io-channels, input-current-limit-microamp ]
+  maxim,dcp-constant-charge-current-microamp: [ maxim,dcp-input-current-limit-microamp ]
 
 required:
   - compatible

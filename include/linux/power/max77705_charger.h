@@ -221,7 +221,9 @@ struct max77705_charger_data {
 	int			soc_end;	/* stop at or above this capacity, % */
 	int			soc;
 	unsigned long		block;
-	unsigned int		cc_max_ua;
+	unsigned int		cc_max_ua;	/* reference charge current now (per cable) */
+	unsigned int		cc_sdp_ua;	/* default: battery constant-charge-current-max */
+	unsigned int		cc_dcp_ua;	/* BC1.2 DCP detected; 0 = not used */
 	unsigned int		chgin_max_ua;	/* reference input limit now (per cable) */
 	unsigned int		chgin_sdp_ua;	/* default: USB SDP, CDP, unknown */
 	unsigned int		chgin_dcp_ua;	/* BC1.2 DCP detected; 0 = not used */
